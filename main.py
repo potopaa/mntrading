@@ -4,18 +4,16 @@ from __future__ import annotations
 import os
 import json
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Any, List, Optional, Dict
 
 import click
 import pandas as pd
 
-# === ВАЖНО: используем ваши внутренние модули, как и раньше ===
-# Если у вас имена/пути отличаются, верните как было в вашем файле.
-from features.spread import build_features_for_pairs
+# === внутренние модули проекта ===
+from features.spread import compute_features_for_pairs  # <-- исправлено имя
 from features.labels import build_datasets_for_manifest
 from models.train import train_baseline
-from backtest.run import run_backtest  # если у вас другой модуль, верните исходный импорт
-
+from backtest.run import run_backtest  # если у вас другой путь, верните как было
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "data")).resolve()
 RAW_DIR = DATA_DIR / "raw"
@@ -26,33 +24,23 @@ BACKTEST_DIR = DATA_DIR / "backtest_results"
 SIGNALS_DIR = DATA_DIR / "signals"
 PAIRS_DIR = DATA_DIR / "pairs"
 
-RAW_DIR.mkdir(parents=True, exist_ok=True)
-FEATURES_DIR.mkdir(parents=True, exist_ok=True)
-DATASETS_DIR.mkdir(parents=True, exist_ok=True)
-MODELS_DIR.mkdir(parents=True, exist_ok=True)
-BACKTEST_DIR.mkdir(parents=True, exist_ok=True)
-SIGNALS_DIR.mkdir(parents=True, exist_ok=True)
-PAIRS_DIR.mkdir(parents=True, exist_ok=True)
+for p in [RAW_DIR, FEATURES_DIR, DATASETS_DIR, MODELS_DIR, BACKTEST_DIR, SIGNALS_DIR, PAIRS_DIR]:
+    p.mkdir(parents=True, exist_ok=True)
 
 
-# ---------- NEW: безопасный перевод в UTC миллисекунды ----------
+# ---------- безопасный перевод в UTC миллисекунды ----------
 def _to_utc_ms(dt_like: Optional[Any]) -> int:
     """
     Преобразует строку/число/Timestamp в миллисекунды Unix (UTC).
     Понимает и tz-aware, и naive значения.
-    Примеры входа: "2025-01-01", "2025-01-01T00:00:00Z", pd.Timestamp(...), int(ms), None
-    None -> 0 (что означает "с самого начала").
+    Примеры: "2025-01-01", "2025-01-01T00:00:00Z", pd.Timestamp(...), int(ms), None
+    None -> 0 (означает «с самого начала»).
     """
     if dt_like is None:
         return 0
-    # уже миллисекунды?
     if isinstance(dt_like, (int, float)):
-        # эвристика: если больше 10^10, вероятно это ms, а не секунды
-        if dt_like > 10_000_000_000:
-            return int(dt_like)
-        # секунды -> миллисекунды
-        return int(dt_like * 1000)
-
+        # эвристика: если значение похоже на миллисекунды — возвращаем как есть
+        return int(dt_like if dt_like > 10_000_000_000 else dt_like * 1000)
     ts = pd.Timestamp(dt_like)
     if ts.tzinfo is None:
         ts = ts.tz_localize("UTC")
@@ -78,14 +66,14 @@ def _read_symbols_from_pairs_json(pairs_json_path: Path) -> List[str]:
 
     out: List[str] = []
     for p in pairs:
+        if isinstance(p, dict) and "pair" in p:
+            p = p["pair"]
         if "__" in p:
             a, b = p.split("__", 1)
-            out.append(a)
-            out.append(b)
+            out.extend([a, b])
         else:
-            # на случай, если в файле одиночные символы
             out.append(p)
-    # уникальные в исходном порядке
+
     seen = set()
     uniq = []
     for s in out:
@@ -100,7 +88,7 @@ def _read_symbols_from_pairs_json(pairs_json_path: Path) -> List[str]:
     ["ingest", "features", "dataset", "train", "backtest", "select"],
     case_sensitive=False
 ), required=True, help="Pipeline stage to run.")
-# --- общие/ingest-параметры ---
+# --- ingest ---
 @click.option("--symbols", type=str, default="", help="Path to screened_pairs_*.json or comma-separated symbols.")
 @click.option("--timeframe", type=str, default="5m", show_default=True, help="Timeframe for ingest.")
 @click.option("--limit", type=int, default=1000, show_default=True, help="Bars limit per request (ingest/infer).")
@@ -146,7 +134,7 @@ def main(
     proba_threshold: float,
 ):
     """
-    Orchestrates pipeline stages. Kept compatible with your existing project structure.
+    Orchestrates pipeline stages for mntrading project.
     """
 
     # ---------- MODE: INGEST ----------
@@ -160,15 +148,11 @@ def main(
             raise click.UsageError("--symbols is required for mode=ingest")
 
         # единая стартовая точка
-        since_ms: int
         if since_utc:
             since_ms = _to_utc_ms(since_utc)
         else:
-            # Jan 1 of start_year (или из ENV START_YEAR, или текущий год)
             year = start_year or int(os.getenv("START_YEAR", pd.Timestamp.utcnow().year))
-            # без 'Z', затем локализуем/конвертим безопасно
-            start_iso = f"{year}-01-01 00:00:00"
-            since_ms = _to_utc_ms(start_iso)
+            since_ms = _to_utc_ms(f"{year}-01-01 00:00:00")
 
         click.echo(f"Using {len(syms)} symbols from input")
         click.echo(
@@ -176,17 +160,15 @@ def main(
             f"({pd.Timestamp(since_ms, unit='ms', tz='UTC').isoformat()})"
         )
 
-        # ВАЖНО: здесь остаётся ваша существующая реализация.
-        # Если раньше импортировали функцию из вашего модуля ingestion — зовите её.
-        # Ниже пример вызова, замените на вашу реальную функцию:
-        #
-        # from data.ingest import ingest_ohlcv_ccxt
-        # ingested = ingest_ohlcv_ccxt(syms, timeframe=timeframe, limit=limit, since_ms=since_ms, out_path=RAW_DIR / "ohlcv.parquet")
-        #
-        # Для совместимости оставим "пустой" маркер успешного завершения:
-        #
-        from data.ingest import ingest               # <- как у вас было
-        ingested = ingest(symbols=syms, timeframe=timeframe, limit=limit, since_ms=since_ms, out_path=RAW_DIR / "ohlcv.parquet")
+        # используем вашу реализацию ingestion
+        from data.ingest import ingest
+        ingested = ingest(
+            symbols=syms,
+            timeframe=timeframe,
+            limit=limit,
+            since_ms=since_ms,
+            out_path=RAW_DIR / "ohlcv.parquet",
+        )
         click.echo(f"Ingested {ingested} new bars; saved to {RAW_DIR / 'ohlcv.parquet'}")
         return
 
@@ -201,17 +183,28 @@ def main(
         syms = _read_symbols_from_pairs_json(pairs_file)
         click.echo(f"Using {len(syms)} symbols from input")
 
-        results = build_features_for_pairs(
+        results = compute_features_for_pairs(  # <-- исправлен вызов
             pairs_json=pairs_file,
             raw_parquet=RAW_DIR / "ohlcv.parquet",
             out_dir=FEATURES_DIR,
             beta_window=beta_window,
             z_window=z_window,
         )
-        click.echo(f"Built features for {len(results)} pairs -> {FEATURES_DIR}")
-        # сохраняем манифест там же, как у вас было
+
+        # results может быть list/ dict/ None — приведём к списку пар
+        if isinstance(results, dict):
+            pair_keys = list(results.keys())
+        elif isinstance(results, list):
+            pair_keys = results
+        else:
+            # fallback: собрать по содержимому каталога
+            pair_keys = sorted({p.stem for p in FEATURES_DIR.glob("*/features.parquet")})
+
+        click.echo(f"Built features for {len(pair_keys)} pairs -> {FEATURES_DIR}")
+
+        manifest_obj = {"pairs": pair_keys, "features_dir": str(FEATURES_DIR)}
         (FEATURES_DIR / "_manifest.json").write_text(
-            json.dumps({"pairs": results, "features_dir": str(FEATURES_DIR)}, ensure_ascii=False, indent=2),
+            json.dumps(manifest_obj, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         click.echo(f"Manifest -> {FEATURES_DIR / '_manifest.json'}")
@@ -223,9 +216,8 @@ def main(
         if not manifest_path.exists():
             raise click.ClickException(f"Pairs manifest not found: {manifest_path}")
 
-        click.echo("Found 600 /USDT symbols")  # оставил вашу фразу для совместимости логов
+        click.echo("Found 600 /USDT symbols")  # совместимость с прежними логами
 
-        # ВАЖНО: сигнатура вызова должна соответствовать вашей актуальной версии features.labels
         datasets = build_datasets_for_manifest(
             manifest_path=str(manifest_path),
             raw_parquet=str(RAW_DIR / "ohlcv.parquet"),
@@ -244,7 +236,7 @@ def main(
 
     # ---------- MODE: TRAIN ----------
     if mode.lower() == "train":
-        click.echo("Found 600 /USDT symbols")  # как было в ваших логах
+        click.echo("Found 600 /USDT symbols")
 
         res = train_baseline(
             datasets_dir=str(DATASETS_DIR),
@@ -257,9 +249,10 @@ def main(
             early_stopping_rounds=early_stopping_rounds,
             proba_threshold=proba_threshold,
         )
-        # train_baseline уже пишет отчёт и регистрирует модели в MLflow, как у вас было
         if isinstance(res, dict):
-            (MODELS_DIR / "_train_report.json").write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
+            (MODELS_DIR / "_train_report.json").write_text(
+                json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
             click.echo(f"Train report -> {MODELS_DIR / '_train_report.json'}")
         else:
             click.echo("Train stage finished")
@@ -274,15 +267,16 @@ def main(
             models_dir=str(MODELS_DIR),
             out_dir=str(BACKTEST_DIR),
         )
-        (BACKTEST_DIR / "_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        (BACKTEST_DIR / "_summary.json").write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         click.echo(f"Backtest summary -> {BACKTEST_DIR / '_summary.json'}")
         return
 
     # ---------- MODE: SELECT ----------
     if mode.lower() == "select":
         click.echo("Found 600 /USDT symbols")
-        # Логика выбора champion/registry — оставляем как у вас было.
-        # Ниже лишь пример: читает backtest summary и формирует registry.json
         summary_path = BACKTEST_DIR / "_summary.json"
         if not summary_path.exists():
             raise click.ClickException("Error: No pairs in backtest summary. Run --mode backtest first.")
@@ -293,25 +287,27 @@ def main(
             best = info.get("best", {})
             if not best:
                 continue
-            # ожидается, что train записал run_id/model_name/version в summary
             item = {
                 "run_id": best.get("run_id", ""),
                 "model_name": best.get("model_name", ""),
                 "model_version": str(best.get("model_version", "")),
                 "features": best.get("features", ["pa", "pb", "beta", "alpha", "spread", "z"]),
             }
-            if all(item.values()):
+            # допускаем пустые поля? Лучше убедиться, что ключевые заполнены
+            if item["run_id"] and item["model_name"]:
                 registry[pair_key] = item
 
         out = {
             "updated_at": pd.Timestamp.utcnow().isoformat(timespec="seconds") + "Z",
             "pairs": registry,
         }
-        (MODELS_DIR / "registry.json").write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+        (MODELS_DIR / "registry.json").write_text(
+            json.dumps(out, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         click.echo(f"Registry -> {MODELS_DIR / 'registry.json'}")
         return
 
-    # Если доп. режимы будут — добавить тут
     raise click.ClickException(f"Unknown mode: {mode}")
 
 
