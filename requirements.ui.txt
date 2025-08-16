@@ -1,9 +1,0 @@
-# Минимум для Streamlit-UI
-streamlit>=1.35.0
-pandas>=2.2.2
-numpy>=1.26.4
-requests>=2.32.3
-plotly>=5.22.0
-pyarrow>=16.1.0
-tqdm>=4.66.4
-click>=8.1.7

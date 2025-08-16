@@ -1,4 +1,4 @@
-FROM python:3.12-slim AS base
+FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -12,21 +12,21 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# системные зависимости для numpy/pandas/pyarrow/tqdm/lightgbm и пр.
+# sys deps (lightgbm runtime, git, TLS)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-        libgomp1 \
-        curl ca-certificates \
-        git \
-    && rm -rf /var/lib/apt/lists/*
+    libgomp1 \
+    curl \
+    ca-certificates \
+    git \
+ && rm -rf /var/lib/apt/lists/*
 
-# отдельный слой для зависимостей
+# deps layer
 COPY requirements.txt /app/requirements.txt
 RUN python -m pip install --upgrade pip \
- && pip install -r requirements.txt
+ && pip install --no-cache-dir -r requirements.txt
 
-# копируем весь проект
+# project
 COPY . /app
 
-# по умолчанию контейнер ничего не запускает — команду задаём в docker-compose
-# EXPOSE делаем в compose
+# run command set in docker-compose (container stays alive)
+CMD ["bash", "-lc", "tail -f /dev/null"]

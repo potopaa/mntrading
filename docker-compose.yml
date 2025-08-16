@@ -1,148 +1,99 @@
+version: "3.9"
+
 services:
   minio:
     image: minio/minio:latest
-    container_name: mntrading_minio
-    command: server /data --console-address ":9001"
+    container_name: mntrading-minio
+    command: server /data --console-address ":${MINIO_CONSOLE_PORT}"
     environment:
-      MINIO_ROOT_USER: mluser
-      MINIO_ROOT_PASSWORD: mlpass123
-    volumes:
-      - ./minio-data:/data
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${MINIO_PORT}:9000"
+      - "${MINIO_CONSOLE_PORT}:9001"
+    volumes:
+      - ./data/minio:/data
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
       interval: 10s
-      timeout: 3s
-      retries: 12
-    restart: unless-stopped
+      timeout: 5s
+      retries: 10
 
-  mc:
+  setup-minio:
     image: minio/mc:latest
-    container_name: mntrading_minio_mc
+    container_name: mntrading-minio-setup
     depends_on:
       minio:
         condition: service_healthy
     entrypoint: >
-      /bin/sh -c "
-      mc alias set local http://minio:9000 mluser mlpass123 &&
-      mc mb --ignore-existing local/mlflow &&
-      mc anonymous set download local/mlflow || true &&
-      echo 'MinIO init done' && sleep 2
+      sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} &&
+      mc mb -p local/${MINIO_BUCKET} || true &&
+      mc anonymous set private local/${MINIO_BUCKET} || true
       "
     restart: "no"
 
   mlflow:
-    build:
-      context: .
-      dockerfile: Dockerfile.mlflow
-    image: mntrading-mlflow:latest
-    container_name: mntrading_mlflow
-    environment:
-      BACKEND_STORE_URI: sqlite:////app/mlruns/mlflow.db
-      ARTIFACT_ROOT: s3://mlflow
-      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
-      AWS_ACCESS_KEY_ID: mluser
-      AWS_SECRET_ACCESS_KEY: mlpass123
-    volumes:
-      - ./mlruns:/app/mlruns
-    ports:
-      - "5000:5000"
+    image: python:3.12-slim
+    container_name: mntrading-mlflow
     depends_on:
-      minio:
-        condition: service_healthy
-      mc:
-        condition: service_completed_successfully
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:5000 || exit 1"]
-      interval: 10s
-      timeout: 3s
-      retries: 12
-    restart: unless-stopped
-
-  api:
-    build:
-      context: .
-      dockerfile: Dockerfile.api
-    image: mntrading-api:latest
-    container_name: mntrading_api
+      - setup-minio
+    working_dir: /app
     environment:
-      MLFLOW_TRACKING_URI: http://mlflow:5000
-      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
-      AWS_ACCESS_KEY_ID: mluser
-      AWS_SECRET_ACCESS_KEY: mlpass123
-      PYTHONIOENCODING: utf-8
-    volumes:
-      - ./:/app
-      - ./data:/app/data
-      - ./mlruns:/app/mlruns
-    ports:
-      - "8000:8000"
-    depends_on:
-      mlflow:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
-      interval: 10s
-      timeout: 3s
-      retries: 12
-    restart: unless-stopped
-
-  ui:
-    build:
-      context: .
-      dockerfile: Dockerfile.ui
-    image: mntrading-ui:latest
-    container_name: mntrading_ui
-    depends_on:
-      api:
-        condition: service_healthy
-    environment:
-      API_BASE_URL: http://api:8000
-      PYTHONIOENCODING: utf-8
-      STREAMLIT_SERVER_HEADLESS: "true"
-      STREAMLIT_BROWSER_SERVER_ADDRESS: 0.0.0.0
-    volumes:
-      - ./:/app
-      - ./data:/app/data
-    ports:
-      - "8599:8501"
-    # healthcheck без curl эндпоинта — просто проверяем, что порт отвечает
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "python - <<'PY'\nimport socket,sys\ns=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1',8501)); s.close(); sys.exit(0)\nPY",
-        ]
-      interval: 10s
-      timeout: 3s
-      retries: 12
-    restart: unless-stopped
-
-  airflow:
-    image: apache/airflow:2.9.2-python3.12
-    container_name: mntrading_airflow
-    environment:
-      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
-      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
-      AIRFLOW__WEBSERVER__SECRET_KEY: "demo_secret_key"
-      PIP_ADDITIONAL_REQUIREMENTS: "requests==2.32.3"
-      API_BASE_URL: http://api:8000
-      MLFLOW_TRACKING_URI: http://mlflow:5000
-      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
-      AWS_ACCESS_KEY_ID: mluser
-      AWS_SECRET_ACCESS_KEY: mlpass123
-    volumes:
-      - ./dags:/opt/airflow/dags
-      - ./logs/airflow:/opt/airflow/logs
-    ports:
-      - "8080:8080"
+      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
     command: >
-      bash -c "airflow db init &&
-               airflow users create --username admin --password admin --firstname A --lastname I --role Admin --email admin@example.com || true &&
-               airflow webserver -p 8080 & airflow scheduler"
+      bash -lc "pip install --no-cache-dir mlflow boto3 &&
+                mlflow server
+                  --host 0.0.0.0
+                  --port ${MLFLOW_PORT}
+                  --backend-store-uri sqlite:////app/mlflow.db
+                  --artifacts-destination s3://${MINIO_BUCKET}
+                  --gunicorn-opts '--timeout 300'"
+    ports:
+      - "${MLFLOW_PORT}:5000"
+    volumes:
+      - ./mlflow.db:/app/mlflow.db
+      - ./mlruns:/app/mlruns
+
+  app:
+    build: .
+    container_name: mntrading-app
     depends_on:
-      api:
-        condition: service_healthy
-    restart: unless-stopped
+      - mlflow
+    environment:
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
+      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
+      MLFLOW_REGISTER: "0"
+    volumes:
+      - .:/app
+      - ./data:/app/data
+      - ./mlruns:/app/mlruns
+
+  streamlit:
+    build: .
+    container_name: mntrading-ui
+    depends_on:
+      - app
+    environment:
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
+      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
+    command: >
+      bash -lc "streamlit run ui/streamlit_app.py
+                --server.address 0.0.0.0
+                --server.port ${STREAMLIT_PORT}
+                --browser.serverAddress 127.0.0.1
+                --browser.gatherUsageStats false"
+    ports:
+      - "${STREAMLIT_PORT}:${STREAMLIT_PORT}"
+    volumes:
+      - .:/app
+      - ./data:/app/data

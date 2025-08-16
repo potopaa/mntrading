@@ -1,30 +1,35 @@
-# VCS / venv / caches
-.git
-.venv
-.vscode
-.idea
+# VCS / IDE / caches
+.venv/
+.vscode/
+.idea/
 __pycache__/
 .ipynb_checkpoints/
 .pytest_cache/
 *.pyc
 *.pyo
 *.pyd
-*.log
 
+# Project data & artifacts
 data/*
 !data/.gitkeep
 mlruns/*
 !mlruns/.gitkeep
+mlflow.db
 
-*.parquet
-*.feather
-*.arrow
-*.csv
-*.json
-*.jsonl
-*.zip
-*.gz
-*.png
-*.jpg
-*.jpeg
-*.svg
+# Ignore heavy formats only under data/**
+data/**/*.parquet
+data/**/*.feather
+data/**/*.arrow
+data/**/*.csv
+data/**/*.json
+data/**/*.jsonl
+data/**/*.zip
+data/**/*.gz
+data/**/*.png
+data/**/*.jpg
+data/**/*.jpeg
+data/**/*.svg
+
+# OS
+.DS_Store
+Thumbs.db
