@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1.7
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Нужны curl для healthcheck и сертификаты
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Обновим pip и добавим setuptools (даёт pkg_resources) + wheel
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# Mlflow + S3 (MinIO) + gunicorn
+RUN pip install --no-cache-dir \
+    mlflow==2.14.1 \
+    boto3==1.34.131 \
+    gunicorn
+
+# Директория для БД и локального стореджа (бэкенд хранилища)
+RUN mkdir -p /app/mlruns
+
+# Переменные окружения по умолчанию (могут быть переопределены в compose)
+ENV BACKEND_STORE_URI=sqlite:////app/mlruns/mlflow.db \
+    ARTIFACT_ROOT=s3://mlflow \
+    MLFLOW_S3_ENDPOINT_URL=http://minio:9000 \
+    AWS_ACCESS_KEY_ID=mluser \
+    AWS_SECRET_ACCESS_KEY=mlpass123 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONIOENCODING=utf-8
+
+EXPOSE 5000
+
+# Старт mlflow-сервера
+CMD ["bash", "-lc", "mlflow server \
+  --host 0.0.0.0 \
+  --port 5000 \
+  --backend-store-uri ${BACKEND_STORE_URI} \
+  --artifacts-destination ${ARTIFACT_ROOT}"]
