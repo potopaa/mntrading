@@ -1,196 +1,325 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+Inference for mntrading:
+- Reads a registry of champion pairs (production_map or registry)
+- Reads features manifest to locate per-pair features.parquet
+- Computes latest signals per pair using z-score mean-reversion rule
+- Appends JSONL signals to data/signals/<PAIR>.jsonl
+
+Usage (example):
+    python inference.py \
+      --registry data/models/production_map.json \
+      --pairs-manifest data/features/pairs/_manifest.json \
+      --timeframe 5m --limit 1000 \
+      --proba-threshold 0.55 --z-entry 1.5 --z-exit 0.5 \
+      --update --n-last 1 \
+      --out data/signals
+"""
+
+from __future__ import annotations
+
 import json
-import os
+import math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import click
-import mlflow
 import numpy as np
 import pandas as pd
-from mlflow.tracking import MlflowClient
 
 
-def _pair_to_model_name(pair_key: str) -> str:
-    # "ADA/USDT__DOT/USDT" -> "mntrading__ADA_USDT__DOT_USDT"
-    return "mntrading__" + pair_key.replace("/", "_")
+# -------------------- IO helpers --------------------
+def _ensure_utf8_stdout():
+    import sys
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 
-def _load_model_anyway(pair_key: str, run_id: Optional[str], model_version: Optional[str]) -> object:
+def _normalize_pair_key(s: str) -> str:
     """
-    Try: registry by (name, version) -> registry by stage 'Staging' -> runs:/<run_id>/...
+    Accepts both "AAA/USDT__BBB/USDT" and "AAA_USDT__BBB_USDT".
+    Returns normalized "AAA/USDT__BBB/USDT".
     """
-    name = _pair_to_model_name(pair_key)
-    # 1) registry by version
-    if model_version:
-        target = f"models:/{name}/{model_version}"
-        try:
-            return mlflow.pyfunc.load_model(target)
-        except Exception:
-            pass
-    # 2) registry by stage
-    for stage in ("Staging", "Production"):
-        try:
-            return mlflow.pyfunc.load_model(f"models:/{name}/{stage}")
-        except Exception:
-            pass
-    # 3) runs by common paths
-    if run_id:
-        candidates = ["model", "models", "sklearn-model", "xgb-model", "lgbm-model", ""]
-        for sub in candidates:
-            uri = f"runs:/{run_id}/{sub}" if sub else f"runs:/{run_id}"
-            try:
-                return mlflow.pyfunc.load_model(uri)
-            except Exception:
-                continue
-    raise RuntimeError(f"cannot load model for {pair_key} (run_id={run_id}, version={model_version})")
+    if "__" in s and "/" not in s:
+        a, b = s.split("__", 1)
+        a = a.replace("_", "/")
+        b = b.replace("_", "/")
+        return f"{a}__{b}"
+    return s
 
 
-def _parse_registry(path: Path) -> Dict[str, Dict]:
-    with open(path, "r", encoding="utf-8") as f:
-        obj = json.load(f)
-    # поддержка форматов: {"pairs": {...}} или просто {"pair": {...}} и т.д.
-    pairs = obj.get("pairs") or obj
-    if not isinstance(pairs, dict):
+def _split_pair(pair_key: str) -> Tuple[str, str]:
+    if "__" not in pair_key:
+        return pair_key, pair_key
+    a, b = pair_key.split("__", 1)
+    return a, b
+
+
+def _parse_registry(path: str) -> List[str]:
+    """
+    Supported registry formats:
+    - production_map.json: {"pairs": ["AAA/USDT__BBB/USDT", ...]}
+    - registry.json:       {"pairs": [{"pair":"AAA/USDT__BBB/USDT", ...}, ...]}
+    - plain list:          ["AAA/USDT__BBB/USDT", ...]
+    - features manifest:   {"items":[{"pair":"AAA/USDT__BBB/USDT", "path":"..."}]}
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Registry not found: {p}")
+
+    try:
+        obj = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise ValueError(f"Cannot read registry JSON {p}: {e}")
+
+    pairs: List[str] = []
+
+    if isinstance(obj, dict) and "pairs" in obj:
+        arr = obj["pairs"] or []
+        for it in arr:
+            if isinstance(it, str):
+                pairs.append(_normalize_pair_key(it))
+            elif isinstance(it, dict):
+                if "pair" in it and isinstance(it["pair"], str):
+                    pairs.append(_normalize_pair_key(it["pair"]))
+                elif "a" in it and "b" in it:
+                    pairs.append(f"{str(it['a'])}__{str(it['b'])}")
+
+    if not pairs and isinstance(obj, dict) and "items" in obj:
+        for it in obj["items"] or []:
+            if isinstance(it, dict) and "pair" in it:
+                pairs.append(_normalize_pair_key(str(it["pair"])))
+
+    if not pairs and isinstance(obj, list):
+        for s in obj:
+            if isinstance(s, str):
+                pairs.append(_normalize_pair_key(s))
+
+    pairs = sorted({p for p in pairs if isinstance(p, str) and "__" in p})
+    if not pairs:
         raise ValueError(f"Unsupported or empty registry format: {path}")
-    out = {}
-    for pkey, info in pairs.items():
-        if not isinstance(info, dict):
-            continue
-        run_id = str(info.get("run_id") or "").strip() or None
-        model_version = str(info.get("model_version") or "").strip() or None
-        out[pkey] = {"run_id": run_id, "model_version": model_version}
-    return out
+    return pairs
 
 
-def _read_pairs_manifest(manifest_path: Path) -> Dict[str, str]:
+def _load_manifest_pairs_paths(manifest_path: str) -> Dict[str, str]:
     """
-    Возвращает {pair_key: parquet_path}
-    Ожидает форматы:
-      {"items":[{"pair":"...","path":"..."}]}  или {"pairs":[{...}]}  или просто список [{...}]
+    Returns mapping: pair_key -> absolute path to features.parquet
     """
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        obj = json.load(f)
+    p = Path(manifest_path)
+    if not p.exists():
+        raise FileNotFoundError(f"Pairs manifest not found: {p}")
+    obj = json.loads(p.read_text(encoding="utf-8"))
+    mp: Dict[str, str] = {}
+    for it in obj.get("items", []):
+        pk = _normalize_pair_key(str(it.get("pair")))
+        path = it.get("path")
+        if pk and path:
+            mp[pk] = str(Path(path).resolve())
+    return mp
 
-    if isinstance(obj, list):
-        entries = obj
-    elif isinstance(obj, dict):
-        if isinstance(obj.get("items"), list):
-            entries = obj["items"]
-        elif isinstance(obj.get("pairs"), list):
-            entries = obj["pairs"]
+
+def _read_last_jsonl_ts(path: Path) -> Optional[pd.Timestamp]:
+    """
+    Read last non-empty line and return its ts as pandas Timestamp (UTC), if any.
+    """
+    if not path.exists():
+        return None
+    try:
+        # read from the end
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            if size == 0:
+                return None
+            buf = bytearray()
+            i = size - 1
+            while i >= 0:
+                f.seek(i)
+                ch = f.read(1)
+                if ch == b"\n" and buf:
+                    break
+                buf.extend(ch)
+                i -= 1
+        line = bytes(reversed(buf)).decode("utf-8").strip()
+        if not line:
+            return None
+        obj = json.loads(line)
+        ts = obj.get("ts")
+        if ts is None:
+            return None
+        return pd.to_datetime(ts, utc=True, errors="coerce")
+    except Exception:
+        return None
+
+
+def _append_jsonl(out_path: Path, rows: List[dict]):
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("a", encoding="utf-8") as w:
+        for r in rows:
+            w.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+# -------------------- Signal logic --------------------
+def _logistic_proba(z_abs: float, z_entry: float, k: float = 1.5) -> float:
+    """Map |z| relative to z_entry into probability in (0.5..0.99)."""
+    x = z_abs - float(z_entry)
+    # logistic centered at 0 => 0.5 at threshold
+    p = 1.0 / (1.0 + math.exp(-k * x))
+    # clip to avoid extremes
+    return float(min(0.99, max(0.5, p)))
+
+
+def _infer_signals_for_pair(
+    features_parquet: str,
+    pair_key: str,
+    n_last: int,
+    z_entry: float,
+    z_exit: float,
+    update: bool,
+    existing_last_ts: Optional[pd.Timestamp],
+) -> List[dict]:
+    """
+    Build signals for the last n_last bars from features parquet.
+    If update=True and existing_last_ts provided, only emit bars strictly after that ts.
+    """
+    df = pd.read_parquet(features_parquet)
+    # normalize columns
+    cols = {c.lower(): c for c in df.columns}
+    if "ts" not in df.columns:
+        if isinstance(df.index, pd.DatetimeIndex):
+            df = df.reset_index().rename(columns={"index": "ts"})
         else:
-            # берём первый list-поля в объекте
-            lists = [v for v in obj.values() if isinstance(v, list)]
-            entries = lists[0] if lists else []
-    else:
-        entries = []
+            raise ValueError(f"{features_parquet} must have 'ts' column or DatetimeIndex")
+    if "z" not in cols:
+        raise ValueError(f"{features_parquet} lacks 'z' column")
 
-    out = {}
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        pair = e.get("pair")
-        path = e.get("path")
-        if pair and path:
-            out[pair] = path
-    return out
+    df = df[["ts", cols["z"]]].rename(columns={cols["z"]: "z"}).copy()
+    df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+    df = df.dropna(subset=["ts"]).sort_values("ts").reset_index(drop=True)
+
+    if update and existing_last_ts is not None:
+        df = df[df["ts"] > existing_last_ts]
+
+    if n_last > 0:
+        df = df.tail(int(n_last))
+
+    if df.empty:
+        return []
+
+    # make hysteresis with previous state if we had one (from existing file)
+    # but since мы не читаем весь файл (дорого), гистерезис реализуем без истории:
+    # вход при |z| >= z_entry, выход при |z| <= z_exit; если между — не сигналим.
+    a, b = _split_pair(pair_key)
+    rows: List[dict] = []
+    for _, r in df.iterrows():
+        z = float(r["z"])
+        ts_iso = pd.Timestamp(r["ts"]).isoformat()
+        z_abs = abs(z)
+
+        if z_abs >= z_entry:
+            side = "long_spread" if z < 0 else "short_spread"  # mean-reversion: negative z -> long spread
+            proba = _logistic_proba(z_abs, z_entry)
+            rows.append({
+                "ts": ts_iso,
+                "pair": pair_key,
+                "a": a,
+                "b": b,
+                "side": side,
+                "proba": proba,
+                "z": z,
+            })
+        elif z_abs <= z_exit:
+            # emit explicit flat signal to allow downstream to close
+            rows.append({
+                "ts": ts_iso,
+                "pair": pair_key,
+                "a": a,
+                "b": b,
+                "side": "flat",
+                "proba": 0.5,
+                "z": z,
+            })
+        else:
+            # between entry and exit — оставляем без записи
+            pass
+
+    return rows
 
 
+# -------------------- CLI --------------------
 @click.command()
-@click.option("--registry", "registry_path", type=click.Path(path_type=Path), required=True)
-@click.option("--pairs-manifest", "manifest_path", type=click.Path(path_type=Path), required=True)
-@click.option("--timeframe", type=str, default="5m", show_default=True)
-@click.option("--limit", type=int, default=1000, show_default=True)
-@click.option("--proba-threshold", type=float, default=0.55, show_default=True)
-@click.option("--update", is_flag=True, help="Append to existing jsonl if exists")
-@click.option("--n-last", type=int, default=1, show_default=True, help="How many last bars to score")
-@click.option("--out", "out_dir", type=click.Path(path_type=Path), default=Path("data/signals"), show_default=True)
+@click.option("--registry", "registry_path", required=True, type=click.Path(exists=True, dir_okay=False),
+              help="Path to production_map.json or registry.json")
+@click.option("--pairs-manifest", "pairs_manifest", required=True, type=click.Path(exists=True, dir_okay=False),
+              help="Path to features manifest (data/features/pairs/_manifest.json)")
+@click.option("--timeframe", default="5m", show_default=True, help="Timeframe (informational)")
+@click.option("--limit", default=1000, show_default=True, type=int, help="Bars to consider (informational)")
+@click.option("--proba-threshold", default=0.55, show_default=True, type=float,
+              help="Threshold used downstream (informational here, affects logistic scale)")
+@click.option("--z-entry", default=1.5, show_default=True, type=float, help="Entry threshold on |z|")
+@click.option("--z-exit", default=0.5, show_default=True, type=float, help="Exit threshold on |z|")
+@click.option("--n-last", default=1, show_default=True, type=int, help="How many latest bars to emit per pair")
+@click.option("--update", is_flag=True, help="Append only new records after last ts in the JSONL")
+@click.option("--out", "out_dir", required=True, type=click.Path(file_okay=False),
+              help="Directory to store signals JSONL files")
 def main(
-    registry_path: Path,
-    manifest_path: Path,
+    registry_path: str,
+    pairs_manifest: str,
     timeframe: str,
     limit: int,
     proba_threshold: float,
-    update: bool,
+    z_entry: float,
+    z_exit: float,
     n_last: int,
-    out_dir: Path,
+    update: bool,
+    out_dir: str,
 ):
-    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-    out_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_utf8_stdout()
 
-    reg = _parse_registry(registry_path)
-    feat_map = _read_pairs_manifest(manifest_path)
+    out_root = Path(out_dir)
+    out_root.mkdir(parents=True, exist_ok=True)
 
-    # какие пары реально сможем скорить
-    pairs_to_score = []
-    for pkey, meta in reg.items():
-        if pkey not in feat_map:
-            print(f"[warn] features parquet not found for pair '{pkey}': None")
+    pairs = _parse_registry(registry_path)
+    mp = _load_manifest_pairs_paths(pairs_manifest)
+
+    # Emit signals per pair
+    total = 0
+    wrote = 0
+    for pk in pairs:
+        total += 1
+        fpath = mp.get(pk)
+        if not fpath or not Path(fpath).exists():
+            print(f"[infer] skip {pk}: features parquet not found in manifest")
             continue
-        pairs_to_score.append((pkey, meta))
 
-    if not pairs_to_score:
-        print("[warn] no pairs to score (no features).")
-        return
+        out_path = out_root / (pk.replace("/", "_") + ".jsonl")
+        last_ts = _read_last_jsonl_ts(out_path) if update else None
 
-    # Загрузим последние фичи
-    for idx, (pkey, meta) in enumerate(pairs_to_score, 1):
-        fpath = feat_map[pkey]
         try:
-            df = pd.read_parquet(fpath)
+            rows = _infer_signals_for_pair(
+                features_parquet=fpath,
+                pair_key=pk,
+                n_last=n_last,
+                z_entry=z_entry,
+                z_exit=z_exit,
+                update=update,
+                existing_last_ts=last_ts,
+            )
+            if rows:
+                _append_jsonl(out_path, rows)
+                wrote += len(rows)
+                print(f"[infer] {pk}: +{len(rows)} rows -> {out_path}")
+            else:
+                print(f"[infer] {pk}: nothing to write")
         except Exception as e:
-            print(f"[warn] cannot read features for '{pkey}' at '{fpath}': {e}")
-            continue
+            print(f"[infer] {pk}: error: {e}")
 
-        # последние n_last по времени
-        if isinstance(df.index, pd.DatetimeIndex):
-            df = df.sort_index()
-        sub = df.tail(n_last)
-
-        # загрузка модели
-        try:
-            model = _load_model_anyway(pkey, meta.get("run_id"), meta.get("model_version"))
-        except Exception as e:
-            print(f"[warn] failed to load model for {pkey} (run_id={meta.get('run_id')}): {e}")
-            continue
-
-        # предсказание вероятностей (pyfunc: ожидает DataFrame фич)
-        X = sub.drop(columns=[c for c in ("y",) if c in sub.columns], errors="ignore")
-        try:
-            proba = np.asarray(model.predict(X))
-        except Exception:
-            # некоторые pyfunc возвращают logits/proba разной формы
-            yhat = model.predict(X)
-            proba = np.asarray(yhat)
-
-        # нормируем к [0,1] если надо
-        if proba.ndim > 1 and proba.shape[1] >= 2:
-            proba = proba[:, 1]
-        elif proba.ndim == 1:
-            proba = 1 / (1 + np.exp(-proba))  # на всякий (если logits)
-
-        # собираем сигналы
-        rows = []
-        for ts, p in zip(sub.index, proba):
-            sig = int(p >= float(proba_threshold)) * 2 - 1  # 1-> +1, 0-> -1 (или 0 — если хочешь без позы)
-            rows.append({
-                "ts": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
-                "pair": pkey,
-                "proba": float(p),
-                "signal": int(sig if abs(p - 0.5) > 1e-6 else 0),
-            })
-
-        # записываем jsonl
-        out_path = out_dir / f"{pkey.replace('/', '_')}.jsonl"
-        mode = "a" if update and out_path.exists() else "w"
-        with open(out_path, mode, encoding="utf-8") as f:
-            for r in rows:
-                f.write(json.dumps(r, ensure_ascii=True) + "\n")
-
-        print(f"[ok] {pkey}: {len(rows)} rows -> {out_path}")
+    print(f"[infer] done: pairs={total}, wrote_rows={wrote}, out_dir={out_root}")
 
 
 if __name__ == "__main__":
