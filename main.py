@@ -1,314 +1,540 @@
-﻿# main.py
+﻿#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 from __future__ import annotations
 
-import os
+"""
+Main CLI for the pipeline:
+  screen (separate script) → ingest → features → dataset → train → backtest → select → promote
+
+Design goals:
+- Do NOT depend on a non-existent "data.ingest" module.
+- Prefer your data loader in data_loader/loader.py if present (get_ohlcv/ingest/fetch_ohlcv).
+- Save artifacts under data/* exactly as the project expects.
+- Produce manifests with explicit file paths (so downstream steps never guess paths).
+"""
+
+import argparse
+import glob
 import json
 from pathlib import Path
-from typing import Any, List, Optional, Dict
+from typing import Any, Dict, List, Optional, Tuple
 
-import click
+import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
-# === внутренние модули проекта ===
-from features.spread import compute_features_for_pairs
-from features.labels import build_datasets_for_manifest
-from models.train import train_baseline
-from backtest.runner import run_backtest
+# --------------------------- Paths ---------------------------
+DATA = Path("data")
+RAW_DIR = DATA / "raw"
+FEATURES_DIR = DATA / "features" / "pairs"
+DATASETS_DIR = DATA / "datasets" / "pairs"
+MODELS_DIR = DATA / "models"
+MODELS_PAIRS_DIR = MODELS_DIR / "pairs"
+BACKTEST_DIR = DATA / "backtest_results"
 
-DATA_DIR = Path(os.getenv("DATA_DIR", "data")).resolve()
-RAW_DIR = DATA_DIR / "raw"
-FEATURES_DIR = DATA_DIR / "features" / "pairs"
-DATASETS_DIR = DATA_DIR / "datasets" / "pairs"
-MODELS_DIR = DATA_DIR / "models"
-BACKTEST_DIR = DATA_DIR / "backtest_results"
-SIGNALS_DIR = DATA_DIR / "signals"
-PAIRS_DIR = DATA_DIR / "pairs"
+for d in (RAW_DIR, FEATURES_DIR, DATASETS_DIR, MODELS_DIR, MODELS_PAIRS_DIR, BACKTEST_DIR):
+    d.mkdir(parents=True, exist_ok=True)
 
-for p in [RAW_DIR, FEATURES_DIR, DATASETS_DIR, MODELS_DIR, BACKTEST_DIR, SIGNALS_DIR, PAIRS_DIR]:
-    p.mkdir(parents=True, exist_ok=True)
+# --------------------- Optional imports ----------------------
+HAS_LOADER = False
+_loader = None
+try:
+    # Your custom loader (recommended)
+    from data_loader import loader as _loader  # noqa: E402
+    HAS_LOADER = True
+except Exception:
+    HAS_LOADER = False
+    _loader = None
+
+HAS_SPREAD = False
+_spread = None
+try:
+    from features import spread as _spread  # noqa: E402
+    HAS_SPREAD = True
+except Exception:
+    HAS_SPREAD = False
+    _spread = None
+
+HAS_LABELS = False
+_labels = None
+try:
+    from features.labels import DatasetBuildConfig, build_datasets_for_manifest  # noqa: E402
+    HAS_LABELS = True
+except Exception:
+    HAS_LABELS = False
+    _labels = None
+
+HAS_TRAIN = False
+_train = None
+try:
+    from models.train import train_baseline  # noqa: E402
+    HAS_TRAIN = True
+except Exception:
+    HAS_TRAIN = False
+    _train = None
+
+HAS_BT = False
+_bt = None
+try:
+    from backtest.runner import run_backtest  # noqa: E402
+    HAS_BT = True
+except Exception:
+    HAS_BT = False
+    _bt = None
 
 
-# ---------- безопасный перевод в UTC миллисекунды ----------
-def _to_utc_ms(dt_like: Optional[Any]) -> int:
-    """
-    Преобразует строку/число/Timestamp в миллисекунды Unix (UTC).
-    Понимает и tz-aware, и naive значения.
-    Примеры: "2025-01-01", "2025-01-01T00:00:00Z", pd.Timestamp(...), int(ms), None
-    None -> 0 (означает «с самого начала»).
-    """
-    if dt_like is None:
-        return 0
-    if isinstance(dt_like, (int, float)):
-        # эвристика: если значение похоже на миллисекунды — возвращаем как есть
-        return int(dt_like if dt_like > 10_000_000_000 else dt_like * 1000)
-    ts = pd.Timestamp(dt_like)
-    if ts.tzinfo is None:
-        ts = ts.tz_localize("UTC")
-    else:
-        ts = ts.tz_convert("UTC")
-    return int(ts.timestamp() * 1000)
+# ------------------------- Helpers ---------------------------
+def _save_parquet(df: pd.DataFrame, path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(path, index=False)
 
 
-def _read_symbols_from_pairs_json(pairs_json_path: Path) -> List[str]:
-    """
-    Из файла screened_pairs_*.json достаём список пар вида 'AAA/USDT__BBB/USDT',
-    и возвращаем уникальные базовые символы: ['AAA/USDT', 'BBB/USDT', ...]
-    """
-    with open(pairs_json_path, "r", encoding="utf-8") as f:
-        obj = json.load(f)
-
+def _load_pairs_from_json(path: str) -> List[Tuple[str, str]]:
+    obj = json.loads(Path(path).read_text(encoding="utf-8"))
+    pairs: List[Tuple[str, str]] = []
+    # canonical: {"pairs":[{"a":"AAA/USDT","b":"BBB/USDT"}, ...]}
     if isinstance(obj, dict) and "pairs" in obj:
-        pairs = obj["pairs"]
+        for it in obj["pairs"]:
+            a, b = it.get("a"), it.get("b")
+            if a and b:
+                pairs.append((a, b))
     elif isinstance(obj, list):
-        pairs = obj
+        # allow ["AAA/USDT|BBB/USDT", ...] or [["AAA/USDT","BBB/USDT"], ...]
+        for it in obj:
+            if isinstance(it, str) and "|" in it:
+                a, b = it.split("|", 1)
+                pairs.append((a.strip(), b.strip()))
+            elif isinstance(it, list) and len(it) == 2:
+                pairs.append((str(it[0]), str(it[1])))
+    return pairs
+
+
+def _parse_symbols_arg(arg: str) -> Tuple[List[str], List[Tuple[str, str]], Optional[str]]:
+    """
+    Returns (unique symbols list, pairs list, pairs_json_path if any).
+    --symbols accepts:
+      • CSV: "BTC/USDT,ETH/USDT"
+      • path/glob to screened_pairs_*.json
+    """
+    pairs: List[Tuple[str, str]] = []
+    symbols: List[str] = []
+    pairs_json_path: Optional[str] = None
+
+    paths = sorted(glob.glob(arg))
+    if paths:
+        # Use the latest JSON (typical: data/pairs/screened_pairs_*.json)
+        pairs_json_path = paths[-1]
+        for p in paths:
+            pairs.extend(_load_pairs_from_json(p))
+        symset = set()
+        for a, b in pairs:
+            symset.add(a)
+            symset.add(b)
+        symbols = sorted(symset)
+        return symbols, pairs, pairs_json_path
+
+    # CSV
+    if "," in arg or "/" in arg:
+        symbols = sorted({s.strip() for s in arg.split(",") if s.strip()})
+    return symbols, pairs, pairs_json_path
+
+
+def _fallback_ccxt_ingest(symbols: List[str], timeframe: str, since_utc: Optional[str], limit: int):
+    """
+    Simple CCXT ingest when no custom loader is available.
+    Saves to data/raw/ohlcv.parquet with columns [ts, open, high, low, close, volume, symbol]
+    """
+    import ccxt  # imported on demand
+    ex = ccxt.binance()
+    ex.load_markets()
+
+    def _fetch_one(sym: str) -> pd.DataFrame:
+        since_ms = ex.parse8601(since_utc) if since_utc else None
+        rows = ex.fetch_ohlcv(sym, timeframe=timeframe, since=since_ms, limit=limit)
+        df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
+        df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+        df["symbol"] = sym
+        return df
+
+    frames = []
+    for s in tqdm(symbols, desc="Ingest(ccxt)"):
+        if s not in ex.markets:
+            print(f"[warn] skip {s}: not in exchange markets")
+            continue
+        frames.append(_fetch_one(s))
+    if not frames:
+        raise SystemExit("Nothing ingested (ccxt fallback)")
+    ohlcv = pd.concat(frames, ignore_index=True).sort_values(["symbol", "ts"])
+    _save_parquet(ohlcv, RAW_DIR / "ohlcv.parquet")
+    meta = {
+        "timeframe": timeframe,
+        "since_utc": since_utc,
+        "symbols": sorted(ohlcv["symbol"].unique().tolist()),
+        "rows": int(len(ohlcv)),
+    }
+    (RAW_DIR / "ohlcv_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[ingest] saved {len(ohlcv)} rows → {RAW_DIR/'ohlcv.parquet'}")
+
+
+# ------------------------- Steps -----------------------------
+def step_ingest(symbols_arg: str, timeframe: str, since_utc: Optional[str], limit: int):
+    symbols, _, _ = _parse_symbols_arg(symbols_arg)
+    if not symbols:
+        raise SystemExit("No symbols provided/resolved for ingest")
+
+    # Prefer your custom loader if available
+    if HAS_LOADER:
+        # Supported signatures in loader.py (any of them is OK):
+        #  a) get_ohlcv(symbols=[...], timeframe="5m", since_utc="...", limit=1000) -> DataFrame
+        #  b) ingest(symbols=[...], timeframe="5m", since_utc="...", limit=1000) -> DataFrame | None (may save itself)
+        #  c) fetch_ohlcv(symbol, timeframe, since_utc, limit) -> DataFrame (per-symbol)
+        if hasattr(_loader, "get_ohlcv"):
+            ohlcv = _loader.get_ohlcv(symbols=symbols, timeframe=timeframe, since_utc=since_utc, limit=limit)
+            if not isinstance(ohlcv, pd.DataFrame) or ohlcv.empty:
+                raise SystemExit("loader.get_ohlcv returned empty result")
+            _save_parquet(ohlcv, RAW_DIR / "ohlcv.parquet")
+        elif hasattr(_loader, "ingest"):
+            ohlcv = _loader.ingest(symbols=symbols, timeframe=timeframe, since_utc=since_utc, limit=limit)
+            if isinstance(ohlcv, pd.DataFrame) and not ohlcv.empty:
+                _save_parquet(ohlcv, RAW_DIR / "ohlcv.parquet")
+            elif not (RAW_DIR / "ohlcv.parquet").exists():
+                raise SystemExit("loader.ingest did not produce data/raw/ohlcv.parquet")
+        elif hasattr(_loader, "fetch_ohlcv"):
+            frames = []
+            for s in tqdm(symbols, desc="Ingest(loader.fetch_ohlcv)"):
+                df = _loader.fetch_ohlcv(s, timeframe=timeframe, since_utc=since_utc, limit=limit)
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    if "symbol" not in df.columns:
+                        df = df.assign(symbol=s)
+                    frames.append(df)
+            if not frames:
+                raise SystemExit("loader.fetch_ohlcv returned no data")
+            ohlcv = pd.concat(frames, ignore_index=True).sort_values(["symbol", "ts"])
+            _save_parquet(ohlcv, RAW_DIR / "ohlcv.parquet")
+        else:
+            print("[ingest] No compatible functions in data_loader/loader.py → using CCXT fallback")
+            _fallback_ccxt_ingest(symbols, timeframe, since_utc, limit)
     else:
-        raise ValueError(f"Unsupported pairs file format: {pairs_json_path}")
+        _fallback_ccxt_ingest(symbols, timeframe, since_utc, limit)
 
-    out: List[str] = []
-    for p in pairs:
-        if isinstance(p, dict) and "pair" in p:
-            p = p["pair"]
-        if "__" in p:
-            a, b = p.split("__", 1)
-            out.extend([a, b])
-        else:
-            out.append(p)
-
-    seen = set()
-    uniq = []
-    for s in out:
-        if s not in seen:
-            seen.add(s)
-            uniq.append(s)
-    return uniq
-
-
-@click.command()
-@click.option("--mode", type=click.Choice(
-    ["ingest", "features", "dataset", "train", "backtest", "select"],
-    case_sensitive=False
-), required=True, help="Pipeline stage to run.")
-# --- ingest ---
-@click.option("--symbols", type=str, default="", help="Path to screened_pairs_*.json or comma-separated symbols.")
-@click.option("--timeframe", type=str, default="5m", show_default=True, help="Timeframe for ingest.")
-@click.option("--limit", type=int, default=1000, show_default=True, help="Bars limit per request (ingest/infer).")
-@click.option("--since-utc", "since_utc", type=str, default=None,
-              help="Override start timestamp, e.g. '2025-01-01T00:00:00Z'.")
-@click.option("--start-year", type=int, default=None,
-              help="If since-utc is not set, use Jan 1 of this year in UTC as ingest start.")
-# --- features ---
-@click.option("--beta-window", type=int, default=300, show_default=True, help="Window for beta calc.")
-@click.option("--z-window", type=int, default=300, show_default=True, help="Window for z-score.")
-# --- dataset ---
-@click.option("--pairs-manifest", type=str, default=str(FEATURES_DIR / "_manifest.json"),
-              help="Manifest produced by features stage.")
-@click.option("--label-type", type=click.Choice(["z_threshold"], case_sensitive=False),
-              default="z_threshold", show_default=True, help="Labeling scheme.")
-@click.option("--zscore-threshold", type=float, default=1.5, show_default=True, help="Z threshold for labels.")
-@click.option("--lag-features", type=int, default=1, show_default=True, help="How many lags to add.")
-# --- train ---
-@click.option("--use-dataset", is_flag=True, default=False, help="Use prebuilt dataset from manifest.")
-@click.option("--n-splits", type=int, default=3, show_default=True, help="TimeSeriesSplit - number of splits.")
-@click.option("--gap", type=int, default=5, show_default=True, help="Gap between train and test in bars.")
-@click.option("--max-train-size", type=int, default=2000, show_default=True, help="Max train size per split.")
-@click.option("--early-stopping-rounds", type=int, default=50, show_default=True, help="Early stopping rounds.")
-@click.option("--proba-threshold", type=float, default=0.55, show_default=True, help="Decision threshold.")
-def main(
-    mode: str,
-    symbols: str,
-    timeframe: str,
-    limit: int,
-    since_utc: Optional[str],
-    start_year: Optional[int],
-    beta_window: int,
-    z_window: int,
-    pairs_manifest: str,
-    label_type: str,
-    zscore_threshold: float,
-    lag_features: int,
-    use_dataset: bool,
-    n_splits: int,
-    gap: int,
-    max_train_size: int,
-    early_stopping_rounds: int,
-    proba_threshold: float,
-):
-    """
-    Orchestrates pipeline stages for mntrading project.
-    """
-
-    # ---------- MODE: INGEST ----------
-    if mode.lower() == "ingest":
-        # symbols: либо путь до json, либо CSV-строка
-        if symbols and Path(symbols).exists():
-            syms = _read_symbols_from_pairs_json(Path(symbols))
-        elif symbols:
-            syms = [s.strip() for s in symbols.split(",") if s.strip()]
-        else:
-            raise click.UsageError("--symbols is required for mode=ingest")
-
-        # единая стартовая точка
-        if since_utc:
-            since_ms = _to_utc_ms(since_utc)
-        else:
-            year = start_year or int(os.getenv("START_YEAR", pd.Timestamp.utcnow().year))
-            since_ms = _to_utc_ms(f"{year}-01-01 00:00:00")
-
-        click.echo(f"Using {len(syms)} symbols from input")
-        click.echo(
-            f"Downloading new bars @{timeframe} for {len(syms)} symbols since {since_ms} "
-            f"({pd.Timestamp(since_ms, unit='ms', tz='UTC').isoformat()})"
-        )
-
-        # используем вашу реализацию ingestion
-        from data.ingest import ingest
-        ingested = ingest(
-            symbols=syms,
-            timeframe=timeframe,
-            limit=limit,
-            since_ms=since_ms,
-            out_path=RAW_DIR / "ohlcv.parquet",
-        )
-        click.echo(f"Ingested {ingested} new bars; saved to {RAW_DIR / 'ohlcv.parquet'}")
-        return
-
-    # ---------- MODE: FEATURES ----------
-    if mode.lower() == "features":
-        if not symbols:
-            raise click.UsageError("--symbols must be a path to screened_pairs_*.json for mode=features")
-        pairs_file = Path(symbols)
-        if not pairs_file.exists():
-            raise click.ClickException(f"Pairs file not found: {pairs_file}")
-
-        syms = _read_symbols_from_pairs_json(pairs_file)
-        click.echo(f"Using {len(syms)} symbols from input")
-
-        results = compute_features_for_pairs(  # <-- исправлен вызов
-            pairs_json=pairs_file,
-            raw_parquet=RAW_DIR / "ohlcv.parquet",
-            out_dir=FEATURES_DIR,
-            beta_window=beta_window,
-            z_window=z_window,
-        )
-
-        # results может быть list/ dict/ None — приведём к списку пар
-        if isinstance(results, dict):
-            pair_keys = list(results.keys())
-        elif isinstance(results, list):
-            pair_keys = results
-        else:
-            # fallback: собрать по содержимому каталога
-            pair_keys = sorted({p.stem for p in FEATURES_DIR.glob("*/features.parquet")})
-
-        click.echo(f"Built features for {len(pair_keys)} pairs -> {FEATURES_DIR}")
-
-        manifest_obj = {"pairs": pair_keys, "features_dir": str(FEATURES_DIR)}
-        (FEATURES_DIR / "_manifest.json").write_text(
-            json.dumps(manifest_obj, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        click.echo(f"Manifest -> {FEATURES_DIR / '_manifest.json'}")
-        return
-
-    # ---------- MODE: DATASET ----------
-    if mode.lower() == "dataset":
-        manifest_path = Path(pairs_manifest)
-        if not manifest_path.exists():
-            raise click.ClickException(f"Pairs manifest not found: {manifest_path}")
-
-        click.echo("Found 600 /USDT symbols")  # совместимость с прежними логами
-
-        datasets = build_datasets_for_manifest(
-            manifest_path=str(manifest_path),
-            raw_parquet=str(RAW_DIR / "ohlcv.parquet"),
-            out_dir=str(DATASETS_DIR),
-            label_type=label_type,
-            zscore_threshold=zscore_threshold,
-            lag_features=lag_features,
-        )
-        click.echo(f"Built datasets for {len(datasets)} pairs -> {DATASETS_DIR}")
-        (DATASETS_DIR.parent / "_manifest.json").write_text(
-            json.dumps({"datasets": datasets, "datasets_dir": str(DATASETS_DIR)}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        click.echo(f"Dataset manifest -> {DATASETS_DIR.parent / '_manifest.json'}")
-        return
-
-    # ---------- MODE: TRAIN ----------
-    if mode.lower() == "train":
-        click.echo("Found 600 /USDT symbols")
-
-        res = train_baseline(
-            datasets_dir=str(DATASETS_DIR),
-            features_dir=str(FEATURES_DIR),
-            out_dir=str(MODELS_DIR),
-            use_dataset=use_dataset,
-            n_splits=n_splits,
-            gap=gap,
-            max_train_size=max_train_size,
-            early_stopping_rounds=early_stopping_rounds,
-            proba_threshold=proba_threshold,
-        )
-        if isinstance(res, dict):
-            (MODELS_DIR / "_train_report.json").write_text(
-                json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            click.echo(f"Train report -> {MODELS_DIR / '_train_report.json'}")
-        else:
-            click.echo("Train stage finished")
-        return
-
-    # ---------- MODE: BACKTEST ----------
-    if mode.lower() == "backtest":
-        click.echo("Found 600 /USDT symbols")
-        summary = run_backtest(
-            features_dir=str(FEATURES_DIR),
-            datasets_dir=str(DATASETS_DIR),
-            models_dir=str(MODELS_DIR),
-            out_dir=str(BACKTEST_DIR),
-        )
-        (BACKTEST_DIR / "_summary.json").write_text(
-            json.dumps(summary, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        click.echo(f"Backtest summary -> {BACKTEST_DIR / '_summary.json'}")
-        return
-
-    # ---------- MODE: SELECT ----------
-    if mode.lower() == "select":
-        click.echo("Found 600 /USDT symbols")
-        summary_path = BACKTEST_DIR / "_summary.json"
-        if not summary_path.exists():
-            raise click.ClickException("Error: No pairs in backtest summary. Run --mode backtest first.")
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
-
-        registry: Dict[str, Any] = {}
-        for pair_key, info in summary.get("pairs", {}).items():
-            best = info.get("best", {})
-            if not best:
-                continue
-            item = {
-                "run_id": best.get("run_id", ""),
-                "model_name": best.get("model_name", ""),
-                "model_version": str(best.get("model_version", "")),
-                "features": best.get("features", ["pa", "pb", "beta", "alpha", "spread", "z"]),
-            }
-            # допускаем пустые поля? Лучше убедиться, что ключевые заполнены
-            if item["run_id"] and item["model_name"]:
-                registry[pair_key] = item
-
-        out = {
-            "updated_at": pd.Timestamp.utcnow().isoformat(timespec="seconds") + "Z",
-            "pairs": registry,
+    # write meta (if not already)
+    if (RAW_DIR / "ohlcv.parquet").exists():
+        ohlcv = pd.read_parquet(RAW_DIR / "ohlcv.parquet")
+        meta = {
+            "timeframe": timeframe,
+            "since_utc": since_utc,
+            "symbols": sorted(ohlcv["symbol"].unique().tolist()) if "symbol" in ohlcv.columns else [],
+            "rows": int(len(ohlcv)),
         }
-        (MODELS_DIR / "registry.json").write_text(
-            json.dumps(out, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        click.echo(f"Registry -> {MODELS_DIR / 'registry.json'}")
-        return
+        (RAW_DIR / "ohlcv_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[ingest] meta → {RAW_DIR/'ohlcv_meta.json'}")
 
-    raise click.ClickException(f"Unknown mode: {mode}")
+
+def step_features(symbols_arg: str, beta_window: int, z_window: int):
+    """
+    Build pair features.
+    Accepts --symbols as CSV or as path/glob to screened_pairs_*.json.
+    Writes individual pair folders:
+      data/features/pairs/<A__B>/features.parquet
+    and manifest:
+      data/features/pairs/_manifest.json with explicit paths.
+    """
+    raw_path = RAW_DIR / "ohlcv.parquet"
+    if not raw_path.exists():
+        raise SystemExit(f"{raw_path} not found. Run ingest first.")
+
+    ohlcv = pd.read_parquet(raw_path)
+    symbols, pairs, pairs_json_path = _parse_symbols_arg(symbols_arg)
+
+    produced_pairs: List[str] = []
+
+    if HAS_SPREAD and hasattr(_spread, "compute_features_for_pairs"):
+        # Mode 1: file-based if pairs_json is available
+        if pairs_json_path:
+            out = _spread.compute_features_for_pairs(
+                pairs_json=pairs_json_path,
+                raw_parquet=raw_path,
+                out_dir=FEATURES_DIR,
+                beta_window=beta_window,
+                z_window=z_window,
+            )
+            # out may be a list of pair keys (e.g., ["AAA/USDT__BBB/USDT"])
+            if isinstance(out, list):
+                produced_pairs = out
+        else:
+            # Mode 2: CSV symbols → generate all combinations and save
+            if not pairs:
+                syms = symbols
+                pairs = [(syms[i], syms[j]) for i in range(len(syms)) for j in range(i + 1, len(syms))]
+            res = _spread.compute_features_for_pairs(
+                raw_df=ohlcv, pairs=pairs, beta_window=beta_window, z_window=z_window
+            )
+            # Save each pair to its own folder
+            for pk, df in res.items():
+                safe = pk.replace("/", "_")
+                pair_dir = FEATURES_DIR / safe
+                pair_dir.mkdir(parents=True, exist_ok=True)
+                df.to_parquet(pair_dir / "features.parquet", index=False)
+                produced_pairs.append(pk)
+    else:
+        # Minimal internal fallback (should rarely be needed)
+        print("[features] WARNING: features.spread not available; using minimal internal implementation.")
+        piv = ohlcv.pivot(index="ts", columns="symbol", values="close").sort_index()
+        if not pairs:
+            syms = symbols
+            pairs = [(syms[i], syms[j]) for i in range(len(syms)) for j in range(i + 1, len(syms))]
+
+        def _rolling_beta_alpha(y: pd.Series, x: pd.Series, win: int):
+            x_mean = x.rolling(win).mean()
+            y_mean = y.rolling(win).mean()
+            cov = (x * y).rolling(win).mean() - x_mean * y_mean
+            var = x.rolling(win).var()
+            beta = cov / var
+            alpha = y_mean - beta * x_mean
+            return beta, alpha
+
+        def _zscore(s: pd.Series, win: int):
+            mu = s.rolling(win).mean()
+            sd = s.rolling(win).std()
+            return (s - mu) / sd
+
+        for (a, b) in tqdm(pairs, desc="Features(fallback)"):
+            if a not in piv.columns or b not in piv.columns:
+                continue
+            df = piv[[a, b]].dropna().rename(columns={a: "pa", b: "pb"})
+            if len(df) < max(beta_window, z_window) + 5:
+                continue
+            beta, alpha = _rolling_beta_alpha(df["pa"], df["pb"], beta_window)
+            spread = (df["pa"] - (beta * df["pb"] + alpha))
+            z = _zscore(spread, z_window)
+            out = pd.DataFrame({
+                "ts": df.index,
+                "a": df["pa"].values,
+                "b": df["pb"].values,
+                "beta": beta.values,
+                "alpha": alpha.values,
+                "spread": spread.values,
+                "z": z.values,
+            }).dropna().reset_index(drop=True)
+            pk = f"{a}__{b}"
+            safe = pk.replace("/", "_")
+            pair_dir = FEATURES_DIR / safe
+            pair_dir.mkdir(parents=True, exist_ok=True)
+            out.to_parquet(pair_dir / "features.parquet", index=False)
+            produced_pairs.append(pk)
+
+    # Build manifest with explicit parquet paths
+    items: List[Dict[str, Any]] = []
+    for pk in sorted(set(produced_pairs)):
+        safe = pk.replace("/", "_")
+        path = (FEATURES_DIR / safe / "features.parquet").resolve()
+        if path.exists():
+            items.append({"pair": pk, "path": str(path), "features": ["a", "b", "beta", "alpha", "spread", "z"]})
+    manifest = {"items": items, "features_dir": str(FEATURES_DIR.resolve())}
+    (FEATURES_DIR / "_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[features] built {len(items)} pairs → {FEATURES_DIR}")
+    print(f"[features] manifest → {FEATURES_DIR / '_manifest.json'}")
+
+
+def step_dataset(pairs_manifest: str, label_type: str, z_th: float, lag_features: int, horizon: int):
+    """
+    Build supervised datasets per pair from features manifest.
+    Writes data/datasets/pairs/<A__B>__ds.parquet and data/datasets/_manifest.json
+    """
+    if not HAS_LABELS:
+        raise SystemExit("features.labels not available. Please add features/labels.py with build_datasets_for_manifest()")
+    cfg = DatasetBuildConfig(label_type=label_type, zscore_threshold=float(z_th),
+                             lag_features=int(lag_features), horizon=int(horizon))
+    man = build_datasets_for_manifest(
+        features_manifest=pairs_manifest,
+        out_dir=DATASETS_DIR,
+        cfg=cfg
+    )
+    print(f"[dataset] built {len(man.get('items', []))} datasets → {DATASETS_DIR}")
+    print(f"[dataset] manifest → {(DATASETS_DIR.parent / '_manifest.json')}")
+
+
+def step_train(use_dataset: bool, n_splits: int, gap: int, max_train_size: int,
+               early_stopping_rounds: int, proba_threshold: float):
+    """
+    Train per-pair models with time-series CV, save OOF predictions and a train report.
+    """
+    if not HAS_TRAIN:
+        raise SystemExit("models.train not available. Please add models/train.py with train_baseline().")
+    report = train_baseline(
+        datasets_dir=str(DATASETS_DIR),
+        features_dir=str(FEATURES_DIR),
+        out_dir=str(MODELS_DIR),
+        use_dataset=use_dataset,
+        n_splits=n_splits,
+        gap=gap,
+        max_train_size=max_train_size,
+        early_stopping_rounds=early_stopping_rounds,
+        proba_threshold=proba_threshold,
+    )
+    (MODELS_DIR / "_train_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[train] report → {MODELS_DIR / '_train_report.json'}")
+
+
+def step_backtest(use_dataset: bool, signals_from: str, proba_threshold: float, fee_rate: float):
+    """
+    Backtest using features + optional OOF probabilities. Writes a summary JSON.
+    """
+    if not HAS_BT:
+        raise SystemExit("backtest.runner not available. Please add backtest/runner.py with run_backtest().")
+    summary = run_backtest(
+        features_dir=str(FEATURES_DIR),
+        datasets_dir=str(DATASETS_DIR),
+        models_dir=str(MODELS_DIR),
+        out_dir=str(BACKTEST_DIR),
+        proba_threshold=proba_threshold,
+        fee_rate=fee_rate,
+    )
+    (BACKTEST_DIR / "_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[backtest] summary → {BACKTEST_DIR / '_summary.json'}")
+
+
+def step_select(summary_path: str, registry_out: str, sharpe_min: float, maxdd_max: float, top_k: int):
+    """
+    Champion selection using models/select.py if available; otherwise a simple fallback.
+    """
+    # Try the richer selector
+    try:
+        from models.select import select_champions as _select
+        # optionally pass train report for extra filters (uncomment thresholds if you want them now)
+        _select(
+            summary_path=summary_path,
+            registry_out=registry_out,
+            sharpe_min=sharpe_min,
+            maxdd_max=maxdd_max,
+            top_k=top_k,
+            require_oof=False,             # set True to force OOF-backed pairs only
+            train_report_path=str(MODELS_DIR / "_train_report.json"),
+            min_auc=None,                  # e.g., 0.52 to filter weak AUC
+            min_rows=None,                 # e.g., 400 to filter tiny datasets
+            max_per_symbol=None,           # e.g., 2 to diversify per base symbol
+        )
+        print(f"[select] registry → {registry_out}")
+        return
+    except Exception as e:
+        print(f"[select] models.select not available or failed: {e}")
+        # Fallback: simple filter & sort by Sharpe
+        p = Path(summary_path)
+        if not p.exists():
+            raise SystemExit(f"Summary not found: {p}")
+        obj = json.loads(p.read_text(encoding="utf-8"))
+        pairs = obj.get("pairs", {})
+        rows = []
+        for pair, data in pairs.items():
+            met = (data or {}).get("metrics") or {}
+            sharpe = float(met.get("sharpe") or np.nan)
+            maxdd = float(met.get("maxdd") or np.nan)
+            if np.isnan(sharpe) or np.isnan(maxdd):
+                continue
+            if sharpe >= float(sharpe_min) and maxdd <= float(maxdd_max):
+                rows.append((pair, sharpe, maxdd))
+        rows.sort(key=lambda t: t[1], reverse=True)
+        rows = rows[: int(top_k)]
+        reg = {"pairs": [{"pair": r[0], "rank": i + 1, "metrics": {"sharpe": r[1], "maxdd": r[2]}} for i, r in enumerate(rows)]}
+        Path(registry_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(registry_out).write_text(json.dumps(reg, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[select] registry → {registry_out}")
+
+
+def step_promote(registry_in: str, production_map_out: str):
+    """
+    Promote currently selected champions into a simple production map:
+      {"pairs":["AAA/USDT__BBB/USDT", ...]}
+    """
+    p = Path(registry_in)
+    if not p.exists():
+        raise SystemExit(f"Registry not found: {p}")
+    obj = json.loads(p.read_text(encoding="utf-8"))
+    pairs = [it["pair"] for it in obj.get("pairs", [])]
+    prod = {"pairs": pairs}
+    Path(production_map_out).parent.mkdir(parents=True, exist_ok=True)
+    Path(production_map_out).write_text(json.dumps(prod, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[promote] production map → {production_map_out}")
+
+
+# ------------------------- CLI -------------------------------
+def build_argparser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description="mntrading CLI")
+    ap.add_argument("--mode", required=True,
+                    choices=["ingest", "features", "dataset", "train", "backtest", "select", "promote"])
+
+    # Common / ingest
+    ap.add_argument("--symbols", type=str,
+                    help="CSV of symbols OR path/glob to screened_pairs_*.json (for features/ingest)")
+    ap.add_argument("--timeframe", type=str, default="5m")
+    ap.add_argument("--since-utc", type=str, default=None)
+    ap.add_argument("--limit", type=int, default=1000)
+
+    # features
+    ap.add_argument("--beta-window", type=int, default=300)
+    ap.add_argument("--z-window", type=int, default=300)
+
+    # dataset
+    ap.add_argument("--pairs-manifest", type=str, default=str(FEATURES_DIR / "_manifest.json"))
+    ap.add_argument("--label-type", type=str, default="z_threshold",
+                    choices=["z_threshold", "revert_direction"])
+    ap.add_argument("--zscore-threshold", type=float, default=1.5)
+    ap.add_argument("--lag-features", type=int, default=1)
+    ap.add_argument("--horizon", type=int, default=0)
+
+    # train
+    ap.add_argument("--use-dataset", action="store_true")
+    ap.add_argument("--n-splits", type=int, default=3)
+    ap.add_argument("--gap", type=int, default=5)
+    ap.add_argument("--max-train-size", type=int, default=2000)
+    ap.add_argument("--early-stopping-rounds", type=int, default=50)
+    ap.add_argument("--proba-threshold", type=float, default=0.55)
+
+    # backtest
+    ap.add_argument("--signals-from", type=str, default="oof")
+
+    # select/promote
+    ap.add_argument("--summary-path", type=str, default=str(BACKTEST_DIR / "_summary.json"))
+    ap.add_argument("--registry-out", type=str, default=str(MODELS_DIR / "registry.json"))
+    ap.add_argument("--sharpe-min", type=float, default=0.0)
+    ap.add_argument("--maxdd-max", type=float, default=1.0)
+    ap.add_argument("--top-k", type=int, default=20)
+    ap.add_argument("--production-map-out", type=str, default=str(MODELS_DIR / "production_map.json"))
+    ap.add_argument("--registry-in", type=str, default=str(MODELS_DIR / "registry.json"))
+    return ap
+
+
+def main():
+    ap = build_argparser()
+    args = ap.parse_args()
+    mode = args.mode.lower()
+
+    if mode == "ingest":
+        if not args.symbols:
+            raise SystemExit("--symbols is required for ingest (CSV or data/pairs/screened_pairs_*.json)")
+        step_ingest(args.symbols, args.timeframe, args.since_utc, args.limit)
+
+    elif mode == "features":
+        if not args.symbols:
+            raise SystemExit("--symbols is required for features (CSV or data/pairs/screened_pairs_*.json)")
+        step_features(args.symbols, args.beta_window, args.z_window)
+
+    elif mode == "dataset":
+        step_dataset(args.pairs_manifest, args.label_type, args.zscore_threshold, args.lag_features, args.horizon)
+
+    elif mode == "train":
+        step_train(args.use_dataset, args.n_splits, args.gap, args.max_train_size,
+                   args.early_stopping_rounds, args.proba_threshold)
+
+    elif mode == "backtest":
+        step_backtest(args.use_dataset, args.signals_from, args.proba_threshold, args.fee_rate if hasattr(args, "fee_rate") else 0.0005)
+
+    elif mode == "select":
+        step_select(args.summary_path, args.registry_out, args.sharpe_min, args.maxdd_max, args.top_k)
+
+    elif mode == "promote":
+        step_promote(args.registry_in, args.production_map_out)
 
 
 if __name__ == "__main__":

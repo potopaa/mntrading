@@ -1,5 +1,7 @@
+# .streamlit/config.toml
 [server]
 address = "127.0.0.1"
-port = 59555
-headless = true
+port = 8501
+enableCORS = false
+headless = false
 

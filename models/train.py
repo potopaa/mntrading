@@ -1,438 +1,244 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
+from __future__ import annotations
+
 import json
 import warnings
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.utils.validation import check_is_fitted
 
-# optional boosters
+# optional libs
+_HAS_XGB = False
+_HAS_LGB = False
 try:
-    import xgboost as xgb
+    from xgboost import XGBClassifier
+    _HAS_XGB = True
 except Exception:
-    xgb = None
-
+    pass
 try:
-    import lightgbm as lgb
+    from lightgbm import LGBMClassifier
+    _HAS_LGB = True
 except Exception:
-    lgb = None
+    pass
 
-import mlflow
-from mlflow.tracking import MlflowClient
-from mlflow.models.signature import infer_signature
+warnings.filterwarnings("ignore", category=UserWarning)
 
 
-# ==== utils: trading metrics on validation ====
-
-def _to_signals_from_proba_and_z(proba: pd.Series, z: pd.Series, thr: float) -> pd.Series:
-    sig = pd.Series(0, index=proba.index, dtype=int)
-    m = proba >= thr
-    if "z" in z.index.names or z.index.equals(proba.index):
-        sig.loc[m] = np.where(z.loc[m] < 0, 1, -1)
-    else:
-        sig.loc[m] = 0
-    return sig
+@dataclass
+class TrainConfig:
+    n_splits: int = 3
+    gap: int = 5
+    max_train_size: int = 2000
+    early_stopping_rounds: int = 50
+    proba_threshold: float = 0.55
+    label_type: str = "revert_direction"  # recommended for trading
 
 
-def _val_trading_metrics(sig: pd.Series, price: pd.Series) -> Dict[str, float]:
-    ret = sig.shift(1).fillna(0) * np.log(price).diff().fillna(0)
-    eq = (1 + ret).cumprod()
-    if ret.std(ddof=0) > 0:
-        sharpe = float(np.sqrt(252) * ret.mean() / ret.std(ddof=0))
-    else:
-        sharpe = float("nan")
-    dd = np.maximum.accumulate(eq) - eq
-    maxdd = float((dd / np.maximum.accumulate(eq)).max()) if len(dd) else float("nan")
-    return {"val_sharpe": sharpe, "val_maxdd": maxdd}
+def _read_ds(path: Path) -> pd.DataFrame:
+    df = pd.read_parquet(path)
+    # make ts index
+    if "ts" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
+        df = df.set_index(pd.to_datetime(df["ts"], utc=True, errors="coerce"))
+    elif not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
+    df.index.name = "ts"
+    df = df.sort_index()
+    # drop duplicates
+    df = df[~df.index.duplicated(keep="last")]
+    return df
 
 
-# ==== ES helpers ====
+def _get_Xy(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
+    drop_cols = [c for c in ["ts", "pair_a", "pair_b"] if c in df.columns]
+    X = df.drop(columns=drop_cols + ["y"], errors="ignore")
+    if "y" not in df.columns:
+        raise ValueError("Dataset must contain 'y' column")
+    y = df["y"].astype(int)
+    return X, y
 
-def _fit_with_es(clf, X_tr: pd.DataFrame, y_tr: np.ndarray, X_te: pd.DataFrame, y_te: np.ndarray, es_rounds: int):
-    """
-    Универсальная ранняя остановка:
-    - пробуем старый kwarg `early_stopping_rounds`;
-    - если не сработало — callbacks (новые XGBoost/LightGBM);
-    - если ES недоступен — обучаем без него.
-    """
-    if es_rounds is None or es_rounds <= 0:
-        clf.fit(X_tr, y_tr)
+
+def _iter_tscv(n: int, n_splits: int, gap: int, max_train_size: Optional[int]):
+    splitter = TimeSeriesSplit(n_splits=n_splits, test_size=None, gap=gap)
+    # emulate embargo by trimming train tail by 'gap'
+    for tr_idx, te_idx in splitter.split(np.arange(n)):
+        if len(tr_idx) == 0 or len(te_idx) == 0:
+            continue
+        tr_end = tr_idx[-1] - gap if gap > 0 else tr_idx[-1]
+        tr_idx = tr_idx[: max(0, tr_end + 1)]
+        if max_train_size and len(tr_idx) > max_train_size:
+            tr_idx = tr_idx[-max_train_size:]
+        yield tr_idx, te_idx
+
+
+def _fit_rf(X_tr, y_tr) -> RandomForestClassifier:
+    rf = RandomForestClassifier(
+        n_estimators=400,
+        max_depth=None,
+        min_samples_split=2,
+        min_samples_leaf=1,
+        n_jobs=-1,
+        random_state=42,
+        class_weight="balanced_subsample",
+    )
+    rf.fit(X_tr, y_tr)
+    try:
+        # calibrate to improve probabilities
+        cal = CalibratedClassifierCV(rf, method="isotonic", cv=3)
+        cal.fit(X_tr, y_tr)
+        return cal
+    except Exception:
+        return rf
+
+
+def _fit_xgb(X_tr, y_tr, X_va, y_va, es_rounds: int):
+    if not _HAS_XGB:
+        return None
+    try:
+        clf = XGBClassifier(
+            n_estimators=2000,
+            max_depth=5,
+            learning_rate=0.03,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            reg_lambda=1.0,
+            n_jobs=-1,
+            random_state=42,
+            tree_method="hist",
+            eval_metric="auc",
+        )
+        clf.fit(
+            X_tr, y_tr,
+            eval_set=[(X_va, y_va)],
+            verbose=False,
+            early_stopping_rounds=es_rounds,
+        )
         return clf
-
-    try:
-        clf.fit(X_tr, y_tr, eval_set=[(X_te, y_te)], early_stopping_rounds=es_rounds)
-        return clf
-    except TypeError:
-        pass
-
-    try:
-        if xgb is not None and clf.__class__.__module__.startswith("xgboost"):
-            cb = [xgb.callback.EarlyStopping(rounds=es_rounds, save_best=True)]
-            clf.fit(X_tr, y_tr, eval_set=[(X_te, y_te)], callbacks=cb)
-            return clf
-    except Exception as e:
-        warnings.warn(f"XGBoost ES via callbacks failed: {e}")
-
-    try:
-        if lgb is not None and clf.__class__.__module__.startswith("lightgbm"):
-            cb = [lgb.early_stopping(es_rounds, verbose=False)]
-            clf.fit(X_tr, y_tr, eval_set=[(X_te, y_te)], callbacks=cb)
-            return clf
-    except Exception as e:
-        warnings.warn(f"LightGBM ES via callbacks failed: {e}")
-
-    warnings.warn("Early stopping not available for this classifier. Fitting without ES.")
-    clf.fit(X_tr, y_tr)
-    return clf
-
-
-# ==== MLflow helpers (signature + alias, без deprecated API) ====
-
-def _latest_version_via_search(client: MlflowClient, model_name: str) -> Optional[str]:
-    """Берём последнюю версию через search_model_versions (без Stage API)."""
-    try:
-        vers = client.search_model_versions(f"name = '{model_name}'")
-        if not vers:
-            return None
-        # максимальная по номеру
-        return str(max(int(v.version) for v in vers))
     except Exception:
         return None
 
 
-def _mlflow_log_and_register_model(clf, model_name: str, X_example: Optional[pd.DataFrame] = None):
-    """
-    Логируем и регистрируем модель с подписью:
-      - используем новый аргумент `name="model"` (если недоступен — fallback на `artifact_path`);
-      - передаём signature и input_example;
-      - alias 'staging' ставим через set_model_version_alias, версию берём через search_model_versions.
-    Возвращает dict {version, run_id}.
-    """
-    signature = None
-    input_example = None
+def _fit_lgb(X_tr, y_tr, X_va, y_va, es_rounds: int):
+    if not _HAS_LGB:
+        return None
     try:
-        if X_example is not None and len(X_example) > 0:
-            X_ex = X_example.head(5)
-            # попытаемся вывести целевую форму выхода для сигнатуры
-            try:
-                y_ex = clf.predict_proba(X_ex)[:, 1]
-            except Exception:
-                y_ex = clf.predict(X_ex)
-            signature = infer_signature(X_ex, y_ex)
-            input_example = X_ex
-    except Exception:
-        pass
-
-    # лог модели
-    try:
-        mlflow.sklearn.log_model(
-            sk_model=clf,
-            name="model",
-            registered_model_name=model_name,
-            signature=signature,
-            input_example=input_example
-        )
-    except TypeError:
-        mlflow.sklearn.log_model(
-            sk_model=clf,
-            artifact_path="model",
-            registered_model_name=model_name,
-            signature=signature,
-            input_example=input_example
-        )
-
-    client = MlflowClient()
-    ver = _latest_version_via_search(client, model_name)
-
-    if ver is not None:
-        try:
-            client.set_model_version_alias(name=model_name, version=ver, alias="staging")
-        except Exception:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", FutureWarning)
-                try:
-                    client.transition_model_version_stage(name=model_name, version=ver, stage="Staging")
-                except Exception:
-                    pass
-
-    rid = None
-    try:
-        rid = mlflow.active_run().info.run_id
-    except Exception:
-        pass
-
-    return {"version": ver, "run_id": rid}
-
-
-# ==== config dataclass ====
-
-@dataclass
-class TrainCfg:
-    n_splits: int
-    gap: int
-    max_train_size: Optional[int]
-    early_stopping_rounds: int
-    calibrate_rf: bool
-    proba_threshold: float
-    random_state: int = 42
-    experiment_name: str = "baseline_pair_trading"
-
-
-def _make_models(random_state: int) -> Dict[str, object]:
-    models = {}
-
-    rf = Pipeline([
-        ("scaler", StandardScaler(with_mean=False)),
-        ("clf", RandomForestClassifier(
-            n_estimators=400,
-            max_depth=None,
-            min_samples_leaf=2,
+        clf = LGBMClassifier(
+            n_estimators=5000,
+            max_depth=-1,
+            learning_rate=0.02,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            reg_lambda=1.0,
             n_jobs=-1,
-            random_state=random_state
-        ))
-    ])
-    models["rf"] = rf
-
-    if lgb is not None:
-        lgbm = Pipeline([
-            ("scaler", StandardScaler(with_mean=False)),
-            ("clf", lgb.LGBMClassifier(
-                n_estimators=2000,
-                learning_rate=0.02,
-                num_leaves=63,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                n_jobs=-1,
-                random_state=random_state
-            ))
-        ])
-        models["lgbm"] = lgbm
-
-    if xgb is not None:
-        xgbm = Pipeline([
-            ("scaler", StandardScaler(with_mean=False)),
-            ("clf", xgb.XGBClassifier(
-                n_estimators=3000,
-                max_depth=6,
-                learning_rate=0.02,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                reg_lambda=1.0,
-                n_jobs=-1,
-                random_state=random_state,
-                tree_method="hist",
-                eval_metric="logloss",
-            ))
-        ])
-        models["xgb"] = xgbm
-
-    return models
+            random_state=42,
+            objective="binary",
+        )
+        clf.fit(
+            X_tr, y_tr,
+            eval_set=[(X_va, y_va)],
+            eval_metric="auc",
+            callbacks=[],
+        )
+        return clf
+    except Exception:
+        return None
 
 
-def _time_series_splits(n: int, n_splits: int, gap: int, max_train_size: Optional[int]):
-    base = TimeSeriesSplit(n_splits=n_splits, test_size=None, gap=gap)
-    indices = np.arange(n)
-    for tr, te in base.split(indices):
-        if max_train_size and len(tr) > max_train_size:
-            tr = tr[-max_train_size:]
-        yield tr, te
-
-
-# ==== calibrator helper (совместимость с версиями sklearn) ====
-
-def _make_calibrator(base_clf, method: str = "isotonic", cv: int = 3):
-    """
-    Возвращает CalibratedClassifierCV поверх base_clf.
-    - sklearn>=1.4: аргумент называется `estimator`
-    - старые версии: `base_estimator`
-    """
+def _predict_proba(model, X):
     try:
-        return CalibratedClassifierCV(estimator=base_clf, method=method, cv=cv)
-    except TypeError:
-        return CalibratedClassifierCV(base_estimator=base_clf, method=method, cv=cv)
+        p = model.predict_proba(X)[:, 1]
+    except Exception:
+        p = model.predict(X)
+        # squeeze into [0,1]
+        p = (p - p.min()) / (p.max() - p.min() + 1e-12)
+    return p
 
 
 def train_baseline(
-    X: pd.DataFrame,
-    y: pd.Series,
-    pair_key: str,
-    aux_df: pd.DataFrame,
-    fee_rate: float,
-    proba_threshold: float,
-    n_splits: int,
-    gap: int,
-    max_train_size: Optional[int],
-    early_stopping_rounds: int,
-    calibrate_rf: bool,
-    refit_on_full: bool,
-    random_state: int,
-    experiment_name: str = "baseline_pair_trading",
-) -> Dict:
-    if not isinstance(X, pd.DataFrame):
-        X = pd.DataFrame(X)
-    y = pd.Series(y).astype(int)
-    assert len(X) == len(y), "X and y must have same length"
+    datasets_dir: str,
+    features_dir: str,
+    out_dir: str,
+    use_dataset: bool = True,
+    n_splits: int = 3,
+    gap: int = 5,
+    max_train_size: int = 2000,
+    early_stopping_rounds: int = 50,
+    proba_threshold: float = 0.55,
+) -> Dict[str, Any]:
+    """
+    Train per-pair classifiers using time-series CV and save OOF predictions.
+    Returns report JSON with per-pair AUC and basic stats.
+    """
+    datasets_dir = Path(datasets_dir)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pairs_dir = out_dir / "pairs"
+    pairs_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg = TrainCfg(
-        n_splits=n_splits,
-        gap=gap,
-        max_train_size=max_train_size,
-        early_stopping_rounds=early_stopping_rounds,
-        calibrate_rf=calibrate_rf,
-        proba_threshold=proba_threshold,
-        random_state=random_state,
-        experiment_name=experiment_name
-    )
+    files = sorted(datasets_dir.glob("*__ds.parquet"))
+    report: Dict[str, Any] = {"pairs": {}, "n_splits": n_splits, "gap": gap, "max_train_size": max_train_size}
 
-    os.makedirs("data/models", exist_ok=True)
-    out_dir = os.path.join("data/models", pair_key.replace("/", "_"))
-    os.makedirs(out_dir, exist_ok=True)
+    for f in files:
+        pair_key = f.name.replace("__ds.parquet", "").replace("_", "/")
+        try:
+            df = _read_ds(f)
+            X, y = _get_Xy(df)
+            n = len(df)
+            if n < 200:
+                continue
+            oof = pd.Series(index=df.index, dtype=float)
+            fold_ids = pd.Series(index=df.index, dtype="Int64")
+            aucs: List[float] = []
+            for fold, (tr_idx, te_idx) in enumerate(_iter_tscv(n, n_splits, gap, max_train_size), start=1):
+                if len(tr_idx) == 0 or len(te_idx) == 0:
+                    continue
+                X_tr, y_tr = X.iloc[tr_idx], y.iloc[tr_idx]
+                X_te, y_te = X.iloc[te_idx], y.iloc[te_idx]
+                # validation split for ES
+                split = int(0.8 * len(X_tr))
+                X_tr2, y_tr2 = X_tr.iloc[:split], y_tr.iloc[:split]
+                X_va,  y_va  = X_tr.iloc[split:], y_tr.iloc[split:]
 
-    mlflow.set_experiment(cfg.experiment_name)
+                # fit candidates
+                best_model = _fit_xgb(X_tr2, y_tr2, X_va, y_va, early_stopping_rounds) or \
+                             _fit_lgb(X_tr2, y_tr2, X_va, y_va, early_stopping_rounds)
+                if best_model is None:
+                    best_model = _fit_rf(X_tr, y_tr)
 
-    models = _make_models(cfg.random_state)
-    oof_all: Dict[str, pd.Series] = {}
-    fold_reports: Dict[str, List[Dict]] = {name: [] for name in models.keys()}
+                p = _predict_proba(best_model, X_te)
+                oof.iloc[te_idx] = p
+                fold_ids.iloc[te_idx] = fold
+                try:
+                    aucs.append(roc_auc_score(y_te, p))
+                except Exception:
+                    pass
 
-    feature_cols = list(X.columns)
+            # write OOF
+            pair_safe = f.name.replace("__ds.parquet","")
+            pair_dir = pairs_dir / pair_safe
+            pair_dir.mkdir(parents=True, exist_ok=True)
+            oof_df = pd.DataFrame({"ts": df.index, "y": y.values, "proba": oof.values, "fold": fold_ids.values})
+            oof_df.to_parquet(pair_dir / "oof.parquet", index=False)
 
-    for mdl_name, pipe in models.items():
-        oof = pd.Series(index=X.index, dtype=float)
-
-        for fold_id, (tr_idx, te_idx) in enumerate(_time_series_splits(len(X), cfg.n_splits, cfg.gap, cfg.max_train_size)):
-            X_tr = X.iloc[tr_idx].copy()
-            y_tr = y.iloc[tr_idx].values
-            X_te = X.iloc[te_idx].copy()
-            y_te = y.iloc[te_idx].values
-
-            if mdl_name == "rf" and cfg.calibrate_rf:
-                base_clf = pipe.named_steps["clf"]
-                pipe.named_steps["clf"] = _make_calibrator(base_clf, method="isotonic", cv=3)
-
-            pipe.named_steps["clf"] = _fit_with_es(
-                pipe.named_steps["clf"], X_tr, y_tr, X_te, y_te, cfg.early_stopping_rounds
-            )
-
-            try:
-                p = pipe.named_steps["clf"].predict_proba(X_te)[:, 1]
-            except Exception:
-                pred = pipe.named_steps["clf"].predict(X_te)
-                p = pred if isinstance(pred, np.ndarray) else np.asarray(pred)
-            oof.iloc[te_idx] = p
-
-            # валидационные метрики по фолду
-            try:
-                roc = roc_auc_score(y_te, p)
-            except Exception:
-                roc = float("nan")
-
-            if aux_df is not None and "pa" in aux_df.columns:
-                z = aux_df["z"].reindex(X_te.index) if "z" in aux_df.columns else pd.Series(np.nan, index=X_te.index)
-                sig = _to_signals_from_proba_and_z(pd.Series(p, index=X_te.index), z, cfg.proba_threshold)
-                m = _val_trading_metrics(sig, aux_df["pa"].reindex(X_te.index).dropna())
-            else:
-                m = {"val_sharpe": float("nan"), "val_maxdd": float("nan")}
-
-            fold_reports[mdl_name].append({
-                "fold": fold_id,
-                "roc_auc": float(roc),
-                **m
-            })
-
-        oof_all[mdl_name] = oof
-
-    # агрегируем по фолдам и выбираем лучшую модель
-    cv_summary = {}
-    for mdl_name, reps in fold_reports.items():
-        if not reps:
-            cv_summary[mdl_name] = {"val_sharpe_mean": float("nan"), "roc_auc_mean": float("nan")}
+            report["pairs"][pair_key] = {
+                "rows": int(n),
+                "auc_mean": float(np.nanmean(aucs)) if aucs else float("nan"),
+                "oof_path": str((pair_dir / "oof.parquet").resolve()),
+            }
+        except Exception as e:
+            # skip this pair
             continue
-        sharpe_mean = float(np.nanmean([r["val_sharpe"] for r in reps]))
-        roc_mean = float(np.nanmean([r["roc_auc"] for r in reps]))
-        cv_summary[mdl_name] = {"val_sharpe_mean": sharpe_mean, "roc_auc_mean": roc_mean}
 
-    best_name = max(cv_summary.keys(), key=lambda k: (cv_summary[k]["val_sharpe_mean"], cv_summary[k]["roc_auc_mean"]))
-    best_oof = oof_all[best_name]
-
-    # метрики OOF: считаем только по валидным точкам (без NaN)
-    valid_mask = np.isfinite(best_oof.values)
-    oof_auc_val = float(roc_auc_score(y.loc[best_oof.index][valid_mask], best_oof.values[valid_mask])) if valid_mask.any() and len(np.unique(y)) > 1 else float("nan")
-
-    with mlflow.start_run(run_name=f"{pair_key}__{best_name}"):
-        mlflow.log_params({
-            "pair": pair_key,
-            "n_splits": cfg.n_splits,
-            "gap": cfg.gap,
-            "max_train_size": cfg.max_train_size or 0,
-            "early_stopping_rounds": cfg.early_stopping_rounds,
-            "calibrate_rf": cfg.calibrate_rf,
-            "proba_threshold": cfg.proba_threshold,
-            "features_count": len(feature_cols),
-            "model": best_name
-        })
-
-        for mdl_name, stats in cv_summary.items():
-            mlflow.log_metric(f"{mdl_name}_val_sharpe_mean", stats["val_sharpe_mean"])
-            mlflow.log_metric(f"{mdl_name}_roc_auc_mean", stats["roc_auc_mean"])
-
-        if np.isfinite(oof_auc_val):
-            mlflow.log_metric("oof_roc_auc", oof_auc_val)
-
-        # refit на всём датасете лучшей моделью (с малым вал-срезом для ES)
-        final_model = _make_models(cfg.random_state)[best_name]
-        if best_name == "rf" and cfg.calibrate_rf:
-            base_clf = final_model.named_steps["clf"]
-            final_model.named_steps["clf"] = _make_calibrator(base_clf, method="isotonic", cv=3)
-
-        final_model.named_steps["clf"] = _fit_with_es(
-            final_model.named_steps["clf"],
-            X, y.values,
-            X.iloc[-min(len(X), 1000):], y.iloc[-min(len(y), 1000):].values,
-            cfg.early_stopping_rounds
-        )
-
-        # регистрируем в MLflow с подписью
-        model_name = f"mntrading__{pair_key.replace('/','_')}"
-        reg_info = _mlflow_log_and_register_model(final_model.named_steps["clf"], model_name, X_example=X.head(20))
-        run_id = mlflow.active_run().info.run_id
-
-    # сохраняем OOF и мета локально
-    local_dir = os.path.join(out_dir, best_name)
-    os.makedirs(local_dir, exist_ok=True)
-
-    pd.DataFrame({
-        "y_true": y.loc[best_oof.index].values,
-        "y_proba": best_oof.values
-    }, index=best_oof.index).to_parquet(os.path.join(local_dir, "oof_predictions.parquet"))
-
-    meta = {
-        "pair": pair_key,
-        "model_name": best_name,
-        "features": feature_cols,
-        "oof_metrics": {"roc_auc": oof_auc_val},
-        "cv_val_means": cv_summary[best_name],
-        "run_id": run_id,
-        "model_version": reg_info.get("version") if isinstance(reg_info, dict) else None
-    }
-    with open(os.path.join(local_dir, "meta.json"), "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
-
-    return {
-        "best_model": best_name,
-        "cv_val_means": cv_summary[best_name],
-        "oof_metrics": meta["oof_metrics"],
-        "run_id": run_id,
-        "model_version": meta["model_version"],
-        "features": feature_cols
-    }
+    # write global train report
+    (out_dir / "_train_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report

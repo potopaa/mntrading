@@ -1,188 +1,100 @@
 # -*- coding: utf-8 -*-
 """
-spread.py — утилиты для построения спреда и скользящих признаков.
-Содержит:
-- compute_spread(df, a, b): базовый спред для совместимости (лог-спред по закрытиям)
-- rolling_ols(y, x, window, min_periods)
-- rolling_zscore(s, window, min_periods)
-- НОВОЕ: build_close_matrix, compute_pair_features_from_prices, compute_features_for_pairs
+Feature engineering for pairs trading:
+- Rolling OLS beta/alpha between two instruments (a,b)
+- Spread = a - (beta * b + alpha)
+- Z-score over the spread
+- A dual-interface helper `compute_features_for_pairs`:
+    Mode A (in-memory):  pass raw_df + pairs -> Dict[pair_key, DataFrame]
+    Mode B (file IO):    pass pairs_json + raw_parquet + out_dir -> List[pair_key], and it saves each pair's features to:
+                         <out_dir>/<A__B>/features.parquet
+This design keeps compatibility with both older and newer callers.
 """
 
-from typing import Dict, List, Optional, Tuple
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
+import json
 
 import numpy as np
 import pandas as pd
 
 
-# ------------------------------ базовые функции (совместимость) ------------------------------ #
+# -------------------------- Low-level utils --------------------------
+def compute_spread(df: pd.DataFrame, a: str, b: str) -> pd.Series:
+    """
+    Legacy helper: simple log-spread between a and b (close prices).
+    This is kept for compatibility with any older code that might import it.
+    """
+    if a not in df.columns or b not in df.columns:
+        return pd.Series(dtype=float)
+    return (np.log(df[a]) - np.log(df[b])).rename("spread")
 
-def _coerce_close_wide(df: pd.DataFrame, a: str, b: str) -> pd.DataFrame:
+
+def rolling_ols(y: pd.Series, x: pd.Series, window: int, min_periods: Optional[int] = None) -> Tuple[pd.Series, pd.Series]:
     """
-    Приводит входной df к wide-матрице закрытий: колонки — символы, индекс — datetime.
-    Пытается распознать 3 формата:
-      1) MultiIndex columns: (symbol, field) и поле 'close';
-      2) Long-формат с колонками ['symbol','close'] и индексом-таймом или колонкой 'timestamp';
-      3) Уже wide, где колонки — символы.
+    Cheap rolling OLS approximation (beta, alpha) without statsmodels.
     """
-    # 1) MultiIndex columns
+    minp = min_periods or window
+    x_mean = x.rolling(window, min_periods=minp).mean()
+    y_mean = y.rolling(window, min_periods=minp).mean()
+    cov = (x * y).rolling(window, min_periods=minp).mean() - x_mean * y_mean
+    var = x.rolling(window, min_periods=minp).var()
+    beta = cov / var
+    alpha = y_mean - beta * x_mean
+    return beta.rename("beta"), alpha.rename("alpha")
+
+
+def rolling_zscore(s: pd.Series, window: int, min_periods: Optional[int] = None) -> pd.Series:
+    """
+    Rolling z-score with ddof=0 to match trading usage.
+    """
+    minp = min_periods or window
+    mu = s.rolling(window, min_periods=minp).mean()
+    sd = s.rolling(window, min_periods=minp).std(ddof=0)
+    return ((s - mu) / (sd + 1e-12)).rename("z")
+
+
+def build_close_matrix(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize raw OHLCV into a wide 'close' matrix: index=datetime, columns=symbol.
+    Supports:
+      - MultiIndex columns with 'close' on the last level,
+      - Long format with columns ['symbol','close'] (+ 'timestamp' optional),
+      - Already-wide frames.
+    """
+    # Case 1: MultiIndex columns (try to pick 'close' from the last level)
     if isinstance(df.columns, pd.MultiIndex):
         names = df.columns.names or []
         last_level = names[-1] if names else None
         if last_level:
-            # попробуем срез по последнему уровню
             try:
-                wide = df.xs('close', axis=1, level=last_level)
-                return wide[[a, b]]
-            except Exception:
-                pass
-        if df.columns.nlevels >= 2:
-            try:
-                wide = df.xs('close', axis=1, level=1)
-                return wide[[a, b]]
-            except Exception:
-                pass
-
-    # 2) Long-формат
-    cols_lower = {c.lower(): c for c in df.columns}
-    if 'symbol' in cols_lower and 'close' in cols_lower:
-        # индекс — уже datetime?
-        if not isinstance(df.index, pd.DatetimeIndex):
-            ts_col = cols_lower.get('timestamp')
-            if ts_col is not None:
-                idx = pd.to_datetime(df[ts_col], unit='ms', errors='coerce')
-            else:
-                idx = pd.to_datetime(df.index, errors='coerce')
-            df = df.copy()
-            df.index = idx
-        tmp = df[[cols_lower['symbol'], cols_lower['close']]].copy()
-        tmp['__ts__'] = df.index
-        wide = tmp.pivot_table(index='__ts__', columns=cols_lower['symbol'],
-                               values=cols_lower['close'], aggfunc='last')
-        return wide[[a, b]]
-
-    # 3) fallback — считаем, что df уже wide: колонки — символы
-    return df[[a, b]].copy()
-
-
-def compute_spread(raw_df: pd.DataFrame, a: str, b: str) -> pd.Series:
-    """
-    Совместимая реализация базового спреда:
-      spread = log(close_a) - log(close_b)
-    """
-    px = _coerce_close_wide(raw_df, a, b).dropna()
-    px.columns = ['pa', 'pb']
-    spread = np.log(px['pa']) - np.log(px['pb'])
-    spread.name = f"spread_{a}__{b}"
-    return spread
-
-
-def rolling_ols(y: pd.Series, x: pd.Series, window: int = 300, min_periods: Optional[int] = None) -> Tuple[pd.Series, pd.Series]:
-    """
-    Rolling OLS: y = alpha + beta * x.
-    Возвращает (beta, alpha) как Series, выровненные по индексу.
-    """
-    if min_periods is None:
-        min_periods = window
-
-    mean_x = x.rolling(window, min_periods=min_periods).mean()
-    mean_y = y.rolling(window, min_periods=min_periods).mean()
-    var_x  = x.rolling(window, min_periods=min_periods).var(ddof=0)
-    cov_xy = (x * y).rolling(window, min_periods=min_periods).mean() - mean_x * mean_y
-
-    beta = cov_xy / var_x.replace(0, np.nan)
-    alpha = mean_y - beta * mean_x
-    beta.name = "beta"
-    alpha.name = "alpha"
-    return beta, alpha
-
-
-def rolling_zscore(s: pd.Series, window: int = 300, min_periods: Optional[int] = None) -> pd.Series:
-    """
-    Скользящий z-score.
-    """
-    if min_periods is None:
-        min_periods = window
-    mu = s.rolling(window, min_periods=min_periods).mean()
-    sd = s.rolling(window, min_periods=min_periods).std(ddof=0)
-    z = (s - mu) / sd.replace(0, np.nan)
-    z.name = "z"
-    return z
-
-
-# ------------------------------ расширенные функции (мультипары) ------------------------------ #
-
-def build_close_matrix(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Унифицирует сырой слепок OHLCV в wide-матрицу закрытий (index=datetime, columns=symbol -> close).
-    Поддерживает:
-      1) MultiIndex columns: (symbol, field) и поле 'close'
-      2) Long-формат с колонками ['symbol','close'] и индексом-таймом (или колонкой 'timestamp')
-      3) Уже wide-формат (fallback)
-    """
-    # 1) MultiIndex columns
-    if isinstance(df.columns, pd.MultiIndex):
-        last_level = df.columns.names[-1] if df.columns.names else None
-        if last_level is not None:
-            try:
-                wide = df.xs('close', axis=1, level=last_level)
-                return wide.sort_index()
+                return df.xs("close", axis=1, level=last_level).sort_index()
             except (KeyError, ValueError):
                 pass
-        if df.columns.nlevels >= 2:
-            try:
-                wide = df.xs('close', axis=1, level=1)
-                return wide.sort_index()
-            except (KeyError, ValueError):
-                pass
+        try:
+            return df.xs("close", axis=1, level=-1).sort_index()
+        except (KeyError, ValueError):
+            pass
 
-    # 2) Long-формат
-    cols_lower = {c.lower(): c for c in df.columns}
-    if 'symbol' in cols_lower and 'close' in cols_lower:
+    # Case 2: Long format
+    lower = {str(c).lower(): c for c in df.columns}
+    if "symbol" in lower and "close" in lower:
+        # detect datetime index
         if not isinstance(df.index, pd.DatetimeIndex):
-            ts_col = cols_lower.get('timestamp')
+            ts_col = lower.get("timestamp")
             if ts_col is not None:
-                idx = pd.to_datetime(df[ts_col], unit='ms', errors='coerce')
+                idx = pd.to_datetime(df[ts_col], unit="ms", errors="coerce")
             else:
-                idx = pd.to_datetime(df.index, errors='coerce')
-            df = df.copy()
-            df.index = idx
-        tmp = df[[cols_lower['symbol'], cols_lower['close']]].copy()
-        tmp['__ts__'] = df.index
-        wide = tmp.pivot_table(index='__ts__', columns=cols_lower['symbol'],
-                               values=cols_lower['close'], aggfunc='last')
-        wide.index.name = None
+                idx = pd.to_datetime(df.index, errors="coerce")
+        else:
+            idx = df.index
+        wide = df.set_index(idx).pivot(columns=lower["symbol"], values=lower["close"])
         return wide.sort_index()
 
-    # 3) fallback — уже wide
-    return df.copy().sort_index()
-
-
-def _rolling_ols_y_on_x(y: pd.Series, x: pd.Series, window: int, min_periods: Optional[int] = None) -> pd.DataFrame:
-    """
-    Rolling OLS: y = alpha + beta * x (скользящее окно).
-    Возвращает DataFrame ['beta','alpha'].
-    """
-    if min_periods is None:
-        min_periods = window
-
-    mean_x = x.rolling(window, min_periods=min_periods).mean()
-    mean_y = y.rolling(window, min_periods=min_periods).mean()
-    var_x  = x.rolling(window, min_periods=min_periods).var(ddof=0)
-    cov_xy = (x * y).rolling(window, min_periods=min_periods).mean() - mean_x * mean_y
-
-    beta = cov_xy / var_x.replace(0, np.nan)
-    alpha = mean_y - beta * mean_x
-
-    out = pd.DataFrame({'beta': beta, 'alpha': alpha})
-    return out
-
-
-def _rolling_zscore(s: pd.Series, window: int, min_periods: Optional[int] = None) -> pd.Series:
-    if min_periods is None:
-        min_periods = window
-    mu = s.rolling(window, min_periods=min_periods).mean()
-    sd = s.rolling(window, min_periods=min_periods).std(ddof=0)
-    return (s - mu) / sd.replace(0, np.nan)
+    # Case 3: already wide
+    return df.sort_index()
 
 
 def compute_pair_features_from_prices(
@@ -194,41 +106,108 @@ def compute_pair_features_from_prices(
     min_periods: Optional[int] = None
 ) -> pd.DataFrame:
     """
-    Для пары (a,b) строит фичи на основе цен закрытия: beta, alpha (rolling OLS), spread, z.
-    px: wide-матрица закрытий (index=datetime, columns=symbol).
+    Build pair features (a,b): beta, alpha, spread, z.
+    Returns a DataFrame with columns:
+      ['ts','a','b','beta','alpha','spread','z','pair']
     """
     if a not in px.columns or b not in px.columns:
         return pd.DataFrame()
 
     df = px[[a, b]].dropna().copy()
-    df.columns = ['pa', 'pb']
+    df.columns = ["pa", "pb"]
 
-    ols = _rolling_ols_y_on_x(df['pa'], df['pb'], window=beta_window, min_periods=min_periods)
-    spread = df['pa'] - (ols['alpha'] + ols['beta'] * df['pb'])
-    z = _rolling_zscore(spread, window=z_window, min_periods=min_periods)
+    beta, alpha = rolling_ols(df["pa"], df["pb"], beta_window, min_periods)
+    spread = (df["pa"] - (beta * df["pb"] + alpha)).rename("spread")
+    z = rolling_zscore(spread, z_window, min_periods)
 
-    out = pd.concat([df, ols, spread.rename('spread'), z.rename('z')], axis=1).dropna()
-    out['a'] = a
-    out['b'] = b
-    out['pair'] = f'{a}__{b}'
+    out = pd.concat([df, beta, alpha, spread, z], axis=1).dropna()
+    out.index.name = "ts"
+    out = out.reset_index()
+    out["a"] = a
+    out["b"] = b
+    out["pair"] = f"{a}__{b}"
+    # rename for consistency: original price columns are not needed downstream
+    out = out.rename(columns={"pa": "a_close", "pb": "b_close"})
     return out
 
 
+# ------------------- Dual-interface orchestrator -------------------
 def compute_features_for_pairs(
-    raw_df: pd.DataFrame,
-    pairs: List[Tuple[str, str]],
+    raw_df: Optional[pd.DataFrame] = None,
+    pairs: Optional[List[Tuple[str, str]]] = None,
     beta_window: int = 300,
     z_window: int = 300,
-    min_periods: Optional[int] = None
-) -> Dict[str, pd.DataFrame]:
+    min_periods: Optional[int] = None,
+    *,
+    pairs_json: Optional[Union[str, Path]] = None,
+    raw_parquet: Optional[Union[str, Path]] = None,
+    out_dir: Optional[Union[str, Path]] = None,
+) -> Union[Dict[str, pd.DataFrame], List[str]]:
     """
-    Строит фичи для нескольких пар. Возвращает словарь { 'A__B': df_features }.
+    Two modes:
+
+    Mode A (in-memory):
+        compute_features_for_pairs(raw_df=df, pairs=[("AAA/USDT","BBB/USDT"), ...], ...)
+      → returns dict {'AAA/USDT__BBB/USDT': DataFrame, ...}
+
+    Mode B (file IO):
+        compute_features_for_pairs(pairs_json=<path>, raw_parquet=<path>, out_dir=<dir>, ...)
+      → saves each pair to <out_dir>/<A__B>/features.parquet and returns list of pair keys
     """
+    # File-based mode
+    if pairs_json is not None or raw_parquet is not None or out_dir is not None:
+        if not (pairs_json and raw_parquet and out_dir):
+            raise ValueError("File-based mode requires pairs_json, raw_parquet and out_dir")
+
+        p_json = Path(pairs_json)
+        p_raw = Path(raw_parquet)
+        out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+
+        # load pairs from JSON
+        with p_json.open("r", encoding="utf-8") as f:
+            obj = json.load(f)
+        pair_list: List[Tuple[str, str]] = []
+        entries = obj.get("pairs") or []
+        for e in entries:
+            a = e.get("a") or e.get("A") or e.get("base") or e.get("x") or e.get("left")
+            b = e.get("b") or e.get("B") or e.get("quote") or e.get("y") or e.get("right")
+            if a and b:
+                pair_list.append((str(a), str(b)))
+        if not pair_list:
+            # allow strings like "AAA/USDT__BBB/USDT"
+            arr = obj.get("items") or obj.get("list") or []
+            for s in arr:
+                if isinstance(s, str) and "__" in s:
+                    a, b = s.split("__", 1)
+                    pair_list.append((a.replace("_", "/"), b.replace("_", "/")))
+        if not pair_list:
+            raise ValueError(f"No pairs found in {p_json}")
+
+        # read raw parquet and build a close matrix
+        raw = pd.read_parquet(p_raw)
+        px = build_close_matrix(raw)
+
+        produced: List[str] = []
+        for a, b in pair_list:
+            feat = compute_pair_features_from_prices(px, a, b, beta_window, z_window, min_periods)
+            if feat.empty:
+                continue
+            key_safe = f"{a.replace('/', '_')}__{b.replace('/', '_')}"
+            pair_dir = out / key_safe
+            pair_dir.mkdir(parents=True, exist_ok=True)
+            feat.to_parquet(pair_dir / "features.parquet", index=False)
+            produced.append(f"{a}__{b}")
+        return produced
+
+    # In-memory mode
+    if raw_df is None or pairs is None:
+        raise ValueError("Pass either (raw_df, pairs) or (pairs_json, raw_parquet, out_dir)")
     px = build_close_matrix(raw_df)
     results: Dict[str, pd.DataFrame] = {}
     for (a, b) in pairs:
         feat = compute_pair_features_from_prices(px, a, b, beta_window, z_window, min_periods)
-        key = f'{a}__{b}'
+        key = f"{a}__{b}"
         if not feat.empty:
             results[key] = feat
     return results
