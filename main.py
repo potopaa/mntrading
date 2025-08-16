@@ -10,10 +10,10 @@ import click
 import pandas as pd
 
 # === внутренние модули проекта ===
-from features.spread import compute_features_for_pairs  # <-- исправлено имя
+from features.spread import compute_features_for_pairs
 from features.labels import build_datasets_for_manifest
 from models.train import train_baseline
-from backtest.run import run_backtest  # если у вас другой путь, верните как было
+from backtest.runner import run_backtest
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "data")).resolve()
 RAW_DIR = DATA_DIR / "raw"
