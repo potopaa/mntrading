@@ -1,244 +1,315 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+Robust baseline training for mntrading.
+
+Interface expected by main.py:
+    report = train_baseline(
+        datasets_dir: str,
+        features_dir: str,
+        out_dir: str,
+        use_dataset: bool,
+        n_splits: int,
+        gap: int,
+        max_train_size: int,
+        early_stopping_rounds: int,
+        proba_threshold: float,
+    )
+
+Outputs:
+- data/models/_train_report.json (returned as dict)
+- data/models/pairs/<PAIR>__oof.parquet with columns [ts, y, proba]
+- (optional) models can be saved later if нужно
+"""
+
 from __future__ import annotations
 
 import json
-import warnings
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
 
-from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.utils.validation import check_is_fitted
-
-# optional libs
-_HAS_XGB = False
-_HAS_LGB = False
 try:
-    from xgboost import XGBClassifier
-    _HAS_XGB = True
-except Exception:
-    pass
-try:
-    from lightgbm import LGBMClassifier
-    _HAS_LGB = True
-except Exception:
-    pass
-
-warnings.filterwarnings("ignore", category=UserWarning)
+    import lightgbm as lgb
+except Exception as e:
+    raise SystemExit("LightGBM is required. Install: pip install lightgbm") from e
 
 
-@dataclass
-class TrainConfig:
-    n_splits: int = 3
-    gap: int = 5
-    max_train_size: int = 2000
-    early_stopping_rounds: int = 50
-    proba_threshold: float = 0.55
-    label_type: str = "revert_direction"  # recommended for trading
+# ----------------------- utilities -----------------------
+def _load_pairs_from_manifest(features_manifest_path: Path) -> List[str]:
+    if not features_manifest_path.exists():
+        return []
+    obj = json.loads(features_manifest_path.read_text(encoding="utf-8"))
+    items = obj.get("items") or []
+    pairs = [str(it.get("pair")) for it in items if it.get("pair")]
+    return sorted(set(pairs))
 
 
-def _read_ds(path: Path) -> pd.DataFrame:
-    df = pd.read_parquet(path)
-    # make ts index
-    if "ts" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
-        df = df.set_index(pd.to_datetime(df["ts"], utc=True, errors="coerce"))
-    elif not isinstance(df.index, pd.DatetimeIndex):
-        df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
-    df.index.name = "ts"
-    df = df.sort_index()
-    # drop duplicates
-    df = df[~df.index.duplicated(keep="last")]
-    return df
+def _find_dataset_files(datasets_dir: Path) -> Dict[str, Path]:
+    """
+    Expect per-pair parquet files like: data/datasets/pairs/<A__B>__ds.parquet
+    Returns mapping: "AAA/USDT__BBB/USDT" -> Path
+    """
+    mp: Dict[str, Path] = {}
+    if not datasets_dir.exists():
+        return mp
+    for p in datasets_dir.glob("*__ds.parquet"):
+        key = p.stem.replace("__ds", "")
+        # convert "AAA_USDT__BBB_USDT" -> "AAA/USDT__BBB/USDT"
+        pair_key = key.replace("_USDT", "/USDT").replace("_USDC", "/USDC").replace("_BTC", "/BTC").replace("_ETH", "/ETH")
+        # generic fix (just in case): first split by "__", then reinsert slashes
+        if "__" in key and "/" not in pair_key:
+            a, b = key.split("__", 1)
+            pair_key = a.replace("_", "/") + "__" + b.replace("_", "/")
+        mp[pair_key] = p
+    return mp
 
 
-def _get_Xy(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
-    drop_cols = [c for c in ["ts", "pair_a", "pair_b"] if c in df.columns]
-    X = df.drop(columns=drop_cols + ["y"], errors="ignore")
-    if "y" not in df.columns:
-        raise ValueError("Dataset must contain 'y' column")
-    y = df["y"].astype(int)
-    return X, y
+def _time_series_splits(n: int, n_splits: int, gap: int, max_train_size: int) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """
+    Simple expanding/rolling time series split with optional max_train_size and gap.
+    Returns list of (train_idx, valid_idx).
+    """
+    if n_splits <= 0:
+        return []
+    fold_sizes = []
+    # make roughly equal sized valid folds at the tail
+    base = n // (n_splits + 1)
+    offset = n - base * (n_splits + 1)
+    # we use the last n_splits chunks as validation folds
+    # start index for first validation
+    start_valid = base + offset
+    splits: List[Tuple[np.ndarray, np.ndarray]] = []
+    for i in range(n_splits):
+        valid_start = start_valid + i * base
+        valid_end = valid_start + base
+        if valid_end > n:
+            break
+        train_end = max(0, valid_start - gap)
+        train_start = max(0, train_end - max_train_size) if max_train_size > 0 else 0
+        tr_idx = np.arange(train_start, train_end)
+        va_idx = np.arange(valid_start, valid_end)
+        if len(tr_idx) > 0 and len(va_idx) > 0:
+            splits.append((tr_idx, va_idx))
+    return splits
 
 
-def _iter_tscv(n: int, n_splits: int, gap: int, max_train_size: Optional[int]):
-    splitter = TimeSeriesSplit(n_splits=n_splits, test_size=None, gap=gap)
-    # emulate embargo by trimming train tail by 'gap'
-    for tr_idx, te_idx in splitter.split(np.arange(n)):
-        if len(tr_idx) == 0 or len(te_idx) == 0:
-            continue
-        tr_end = tr_idx[-1] - gap if gap > 0 else tr_idx[-1]
-        tr_idx = tr_idx[: max(0, tr_end + 1)]
-        if max_train_size and len(tr_idx) > max_train_size:
-            tr_idx = tr_idx[-max_train_size:]
-        yield tr_idx, te_idx
+def _class_balance_info(y: np.ndarray) -> Tuple[int, int, float]:
+    total = len(y)
+    pos = int(np.sum(y == 1))
+    neg = total - pos
+    pos_rate = (pos / total) if total else 0.0
+    return pos, neg, pos_rate
 
 
-def _fit_rf(X_tr, y_tr) -> RandomForestClassifier:
-    rf = RandomForestClassifier(
-        n_estimators=400,
-        max_depth=None,
-        min_samples_split=2,
-        min_samples_leaf=1,
-        n_jobs=-1,
-        random_state=42,
-        class_weight="balanced_subsample",
-    )
-    rf.fit(X_tr, y_tr)
-    try:
-        # calibrate to improve probabilities
-        cal = CalibratedClassifierCV(rf, method="isotonic", cv=3)
-        cal.fit(X_tr, y_tr)
-        return cal
-    except Exception:
-        return rf
+def _adaptive_lgb_params(n_train: int) -> Dict:
+    """
+    Choose LightGBM params based on dataset size to avoid 'no more leaves' warning.
+    """
+    # make min_data_in_leaf small for small datasets
+    min_leaf = max(5, n_train // 50)  # ~2% of train set, but at least 5
+    num_leaves = min(63, max(15, n_train // max(1, min_leaf)))  # rough balance
+    params = {
+        "objective": "binary",
+        "boosting_type": "gbdt",
+        "metric": "auc",
+        "learning_rate": 0.05,
+        "num_leaves": int(num_leaves),
+        "min_data_in_leaf": int(min_leaf),
+        "max_depth": -1,
+        "min_gain_to_split": 0.0,   # allow splitting
+        "feature_fraction": 1.0,
+        "bagging_fraction": 1.0,
+        "bagging_freq": 0,
+        "max_bin": 255,
+        "verbosity": -1,
+        "force_col_wise": True,     # stabler on wide data
+        "deterministic": True,
+        "seed": 42,
+    }
+    return params
 
 
-def _fit_xgb(X_tr, y_tr, X_va, y_va, es_rounds: int):
-    if not _HAS_XGB:
-        return None
-    try:
-        clf = XGBClassifier(
-            n_estimators=2000,
-            max_depth=5,
-            learning_rate=0.03,
-            subsample=0.9,
-            colsample_bytree=0.9,
-            reg_lambda=1.0,
-            n_jobs=-1,
-            random_state=42,
-            tree_method="hist",
-            eval_metric="auc",
-        )
-        clf.fit(
-            X_tr, y_tr,
-            eval_set=[(X_va, y_va)],
-            verbose=False,
-            early_stopping_rounds=es_rounds,
-        )
-        return clf
-    except Exception:
-        return None
-
-
-def _fit_lgb(X_tr, y_tr, X_va, y_va, es_rounds: int):
-    if not _HAS_LGB:
-        return None
-    try:
-        clf = LGBMClassifier(
-            n_estimators=5000,
-            max_depth=-1,
-            learning_rate=0.02,
-            subsample=0.9,
-            colsample_bytree=0.9,
-            reg_lambda=1.0,
-            n_jobs=-1,
-            random_state=42,
-            objective="binary",
-        )
-        clf.fit(
-            X_tr, y_tr,
-            eval_set=[(X_va, y_va)],
-            eval_metric="auc",
-            callbacks=[],
-        )
-        return clf
-    except Exception:
-        return None
-
-
-def _predict_proba(model, X):
-    try:
-        p = model.predict_proba(X)[:, 1]
-    except Exception:
-        p = model.predict(X)
-        # squeeze into [0,1]
-        p = (p - p.min()) / (p.max() - p.min() + 1e-12)
-    return p
-
-
+# ----------------------- main trainer -----------------------
 def train_baseline(
     datasets_dir: str,
     features_dir: str,
     out_dir: str,
-    use_dataset: bool = True,
-    n_splits: int = 3,
-    gap: int = 5,
-    max_train_size: int = 2000,
-    early_stopping_rounds: int = 50,
-    proba_threshold: float = 0.55,
-) -> Dict[str, Any]:
+    use_dataset: bool,
+    n_splits: int,
+    gap: int,
+    max_train_size: int,
+    early_stopping_rounds: int,
+    proba_threshold: float,
+) -> Dict:
     """
-    Train per-pair classifiers using time-series CV and save OOF predictions.
-    Returns report JSON with per-pair AUC and basic stats.
+    Train per-pair classifiers with simple time-series CV and produce OOF probabilities.
     """
-    datasets_dir = Path(datasets_dir)
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    pairs_dir = out_dir / "pairs"
-    pairs_dir.mkdir(parents=True, exist_ok=True)
+    out_root = Path(out_dir)
+    out_pairs = out_root / "pairs"
+    out_root.mkdir(parents=True, exist_ok=True)
+    out_pairs.mkdir(parents=True, exist_ok=True)
 
-    files = sorted(datasets_dir.glob("*__ds.parquet"))
-    report: Dict[str, Any] = {"pairs": {}, "n_splits": n_splits, "gap": gap, "max_train_size": max_train_size}
+    # Figure out which pairs to train
+    ds_dir = Path(datasets_dir)
+    ds_files = _find_dataset_files(ds_dir)
+    if not ds_files:
+        # fallback to features manifest (but then we must build labels on the fly)
+        feats_manifest = Path(features_dir) / "_manifest.json"
+        pairs = _load_pairs_from_manifest(feats_manifest)
+        if not pairs:
+            raise SystemExit("No datasets or features manifest found for training.")
+        # we will load features and create labels from z (|z|>thr)
+        from warnings import warn
+        warn("Training without datasets: building labels from features |z| > threshold.")
+        use_dataset = False
+    else:
+        pairs = sorted(ds_files.keys())
 
-    for f in files:
-        pair_key = f.name.replace("__ds.parquet", "").replace("_", "/")
+    summary_pairs: Dict[str, Dict] = {}
+    oof_paths: Dict[str, str] = {}
+
+    for pk in pairs:
         try:
-            df = _read_ds(f)
-            X, y = _get_Xy(df)
-            n = len(df)
+            if use_dataset and pk in ds_files:
+                df = pd.read_parquet(ds_files[pk])
+                # expect columns: ts, y, and feature columns (others)
+                if "ts" not in df.columns:
+                    # try to infer
+                    if "timestamp" in df.columns:
+                        df = df.rename(columns={"timestamp": "ts"})
+                    else:
+                        # create ts from index if needed
+                        if isinstance(df.index, pd.DatetimeIndex):
+                            df = df.reset_index().rename(columns={"index": "ts"})
+                        else:
+                            df["ts"] = np.arange(len(df))
+                if "y" not in df.columns:
+                    # try to build from z if present
+                    if "z" in df.columns:
+                        df["y"] = (df["z"].abs() > proba_threshold).astype(int)
+                    else:
+                        raise ValueError("Dataset has no 'y' column and no 'z' to derive labels.")
+            else:
+                # features mode: load features and build label: y = (|z| > X), default X=1.5
+                pair_dir = Path(features_dir) / pk.replace("/", "_") / "features.parquet"
+                if not pair_dir.exists():
+                    # old layout: features/pairs/<A__B>/features.parquet
+                    pair_dir = Path(features_dir) / pk.replace("/", "_") / "features.parquet"
+                df = pd.read_parquet(pair_dir)
+                if "z" not in df.columns:
+                    raise ValueError("Features lack 'z' column; labels cannot be derived.")
+                df["y"] = (df["z"].abs() > 1.5).astype(int)  # fixed threshold here
+                if "ts" not in df.columns:
+                    # make sure we have ts
+                    if isinstance(df.index, pd.DatetimeIndex):
+                        df = df.reset_index().rename(columns={"index": "ts"})
+                    else:
+                        df["ts"] = np.arange(len(df))
+
+            # Order by time
+            df = df.sort_values("ts").reset_index(drop=True)
+
+            # Features: drop non-numeric and target
+            drop_cols = {"ts", "y", "pair"}
+            X = df.drop(columns=[c for c in df.columns if c in drop_cols], errors="ignore")
+            # keep only numeric
+            X = X.select_dtypes(include=[np.number]).copy()
+            y = df["y"].astype(int).values
+
+            n = len(X)
             if n < 200:
+                # too small to train stably
+                summary_pairs[pk] = {"rows": int(n), "auc_mean": None, "note": "too_few_rows"}
                 continue
-            oof = pd.Series(index=df.index, dtype=float)
-            fold_ids = pd.Series(index=df.index, dtype="Int64")
+
+            # Build folds
+            splits = _time_series_splits(n, n_splits=n_splits, gap=gap, max_train_size=max_train_size)
+            if not splits:
+                summary_pairs[pk] = {"rows": int(n), "auc_mean": None, "note": "no_splits"}
+                continue
+
+            # Storage for OOF
+            oof = np.full(n, np.nan, dtype=float)
             aucs: List[float] = []
-            for fold, (tr_idx, te_idx) in enumerate(_iter_tscv(n, n_splits, gap, max_train_size), start=1):
-                if len(tr_idx) == 0 or len(te_idx) == 0:
+
+            # Iterate folds
+            for (tr_idx, va_idx) in splits:
+                X_tr, y_tr = X.iloc[tr_idx], y[tr_idx]
+                X_va, y_va = X.iloc[va_idx], y[va_idx]
+
+                # Skip folds with one class
+                if len(np.unique(y_tr)) < 2 or len(np.unique(y_va)) < 2:
+                    # mark OOF as 0.5 neutral for this fold
+                    oof[va_idx] = 0.5
                     continue
-                X_tr, y_tr = X.iloc[tr_idx], y.iloc[tr_idx]
-                X_te, y_te = X.iloc[te_idx], y.iloc[te_idx]
-                # validation split for ES
-                split = int(0.8 * len(X_tr))
-                X_tr2, y_tr2 = X_tr.iloc[:split], y_tr.iloc[:split]
-                X_va,  y_va  = X_tr.iloc[split:], y_tr.iloc[split:]
 
-                # fit candidates
-                best_model = _fit_xgb(X_tr2, y_tr2, X_va, y_va, early_stopping_rounds) or \
-                             _fit_lgb(X_tr2, y_tr2, X_va, y_va, early_stopping_rounds)
-                if best_model is None:
-                    best_model = _fit_rf(X_tr, y_tr)
+                pos, neg, pos_rate = _class_balance_info(y_tr)
+                n_tr = len(y_tr)
 
-                p = _predict_proba(best_model, X_te)
-                oof.iloc[te_idx] = p
-                fold_ids.iloc[te_idx] = fold
+                params = _adaptive_lgb_params(n_tr)
+                # handle imbalance (approx)
+                if 0 < pos < n_tr:
+                    params["scale_pos_weight"] = max(1.0, (neg / max(1, pos)))
+
+                dtrain = lgb.Dataset(X_tr, label=y_tr, free_raw_data=True)
+                dvalid = lgb.Dataset(X_va, label=y_va, free_raw_data=True)
+
+                # ensure early stopping won't error out on tiny folds
+                esr = max(10, min(early_stopping_rounds, len(y_va) // 2))
+
+                model = lgb.train(
+                    params=params,
+                    train_set=dtrain,
+                    valid_sets=[dvalid],
+                    num_boost_round=2000,
+                    early_stopping_rounds=esr,
+                    verbose_eval=False,
+                )
+
+                proba = model.predict(X_va, num_iteration=model.best_iteration)
+                # clip just in case
+                proba = np.clip(proba, 1e-6, 1 - 1e-6)
+                oof[va_idx] = proba
+
+                # compute AUC local (safe)
                 try:
-                    aucs.append(roc_auc_score(y_te, p))
+                    from sklearn.metrics import roc_auc_score
+                    auc = roc_auc_score(y_va, proba)
+                    aucs.append(float(auc))
                 except Exception:
                     pass
 
-            # write OOF
-            pair_safe = f.name.replace("__ds.parquet","")
-            pair_dir = pairs_dir / pair_safe
-            pair_dir.mkdir(parents=True, exist_ok=True)
-            oof_df = pd.DataFrame({"ts": df.index, "y": y.values, "proba": oof.values, "fold": fold_ids.values})
-            oof_df.to_parquet(pair_dir / "oof.parquet", index=False)
+            # finalize OOF and report
+            oof = pd.Series(oof).fillna(0.5).values
+            df_oof = pd.DataFrame({"ts": df["ts"].values, "y": y, "proba": oof})
+            oof_path = (out_pairs / f"{pk.replace('/', '_')}__oof.parquet")
+            df_oof.to_parquet(oof_path, index=False)
 
-            report["pairs"][pair_key] = {
+            auc_mean = float(np.nanmean(aucs)) if aucs else None
+            summary_pairs[pk] = {
                 "rows": int(n),
-                "auc_mean": float(np.nanmean(aucs)) if aucs else float("nan"),
-                "oof_path": str((pair_dir / "oof.parquet").resolve()),
+                "auc_mean": auc_mean,
+                "oof_path": str(oof_path),
+                "class_balance": {
+                    "pos_rate_overall": float((y == 1).mean()),
+                },
             }
+
         except Exception as e:
-            # skip this pair
+            summary_pairs[pk] = {"rows": None, "auc_mean": None, "error": str(e)}
             continue
 
-    # write global train report
-    (out_dir / "_train_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    report = {
+        "pairs": summary_pairs,
+        "n_splits": int(n_splits),
+        "gap": int(gap),
+        "max_train_size": int(max_train_size),
+        "proba_threshold": float(proba_threshold),
+    }
+
+    (Path(out_dir) / "_train_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return report
