@@ -115,6 +115,17 @@ with st.sidebar:
     leverage = st.number_input("Leverage", 1.0, 10.0, 1.0, 0.5)
 
     st.markdown("---")
+    st.subheader("Champion selection")
+    sharpe_min_ui = st.number_input("Sharpe min", -2.0, 5.0, 0.0, 0.1)
+    maxdd_max_ui = st.number_input("Max drawdown (≤)", 0.0, 1.0, 1.0, 0.01)
+    top_k_ui = st.number_input("Top-K (final)", 1, 200, 20, 1)
+    require_oof_ui = st.checkbox("Require OOF probabilities", value=False)
+    with st.expander("Advanced filters", expanded=False):
+        min_auc_ui = st.text_input("Min AUC (optional)", value="")
+        min_rows_ui = st.text_input("Min rows (optional)", value="")
+        max_per_symbol_ui = st.text_input("Max per base symbol (optional)", value="")
+
+    st.markdown("---")
     st.caption("API base (read-only):")
     st.code(API_BASE, language="bash")
 
@@ -122,13 +133,11 @@ with st.sidebar:
 # ---------------------- Header ----------------------
 st.title("mntrading — Operations")
 alive = api_alive()
-st.markdown(
-    f'API status: <span class="status-pill {"status-ok" if alive else "status-warn"}'
-    "</span>",
-    unsafe_allow_html=True
-)
+status_class = "status-ok" if alive else "status-warn"
+status_text = "🟢 online" if alive else "🟡 offline (local mode)"
+st.markdown(f'API status: <span class="status-pill {status_class}">{status_text}</span>', unsafe_allow_html=True)
 
-# Figure out symbols source for subsequent steps
+# Determine symbols source for subsequent steps
 pairs_dir = ROOT / "data" / "pairs"
 pairs_dir.mkdir(parents=True, exist_ok=True)
 pairs_jsons = sorted(pairs_dir.glob("screened_pairs_*.json"))
@@ -215,7 +224,18 @@ with tabs[0]:
             cmd = [py(), str(ROOT / "main.py"), "--mode", "select",
                    "--summary-path", str(ROOT / "data" / "backtest_results" / "_summary.json"),
                    "--registry-out", str(ROOT / "data" / "models" / "registry.json"),
-                   "--sharpe-min", "0.0", "--maxdd-max", "1.0", "--top-k", "20"]
+                   "--sharpe-min", str(sharpe_min_ui),
+                   "--maxdd-max", str(maxdd_max_ui),
+                   "--top-k", str(top_k_ui)]
+            if require_oof_ui:
+                cmd += ["--require-oof"]
+            # optional advanced filters (only add if user provided a value)
+            if min_auc_ui.strip():
+                cmd += ["--min-auc", min_auc_ui.strip()]
+            if min_rows_ui.strip():
+                cmd += ["--min-rows", min_rows_ui.strip()]
+            if max_per_symbol_ui.strip():
+                cmd += ["--max-per-symbol", max_per_symbol_ui.strip()]
             st.info("Selecting champions...")
             st.success("done" if run(cmd) == 0 else "failed")
 

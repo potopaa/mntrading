@@ -2,16 +2,15 @@
 # -*- coding: utf-8 -*-
 
 from __future__ import annotations
-
 """
-Main CLI for the pipeline:
-  screen (separate script) → ingest → features → dataset → train → backtest → select → promote
+Main CLI for the mntrading pipeline:
+  screen_pairs.py → (this) ingest → features → dataset → train → backtest → select → promote
 
 Design goals:
-- Do NOT depend on a non-existent "data.ingest" module.
-- Prefer your data loader in data_loader/loader.py if present (get_ohlcv/ingest/fetch_ohlcv).
+- No dependency on any non-existent modules.
+- Prefer your custom data loader in data_loader/loader.py when present.
 - Save artifacts under data/* exactly as the project expects.
-- Produce manifests with explicit file paths (so downstream steps never guess paths).
+- Produce manifests with explicit file paths (downstream never guesses paths).
 """
 
 import argparse
@@ -185,7 +184,7 @@ def step_ingest(symbols_arg: str, timeframe: str, since_utc: Optional[str], limi
 
     # Prefer your custom loader if available
     if HAS_LOADER:
-        # Supported signatures in loader.py (any of them is OK):
+        # Supported signatures in loader.py (any is OK):
         #  a) get_ohlcv(symbols=[...], timeframe="5m", since_utc="...", limit=1000) -> DataFrame
         #  b) ingest(symbols=[...], timeframe="5m", since_utc="...", limit=1000) -> DataFrame | None (may save itself)
         #  c) fetch_ohlcv(symbol, timeframe, since_utc, limit) -> DataFrame (per-symbol)
@@ -246,11 +245,10 @@ def step_features(symbols_arg: str, beta_window: int, z_window: int):
 
     ohlcv = pd.read_parquet(raw_path)
     symbols, pairs, pairs_json_path = _parse_symbols_arg(symbols_arg)
-
     produced_pairs: List[str] = []
 
     if HAS_SPREAD and hasattr(_spread, "compute_features_for_pairs"):
-        # Mode 1: file-based if pairs_json is available
+        # Prefer file-based mode when a pairs JSON path is available
         if pairs_json_path:
             out = _spread.compute_features_for_pairs(
                 pairs_json=pairs_json_path,
@@ -259,18 +257,16 @@ def step_features(symbols_arg: str, beta_window: int, z_window: int):
                 beta_window=beta_window,
                 z_window=z_window,
             )
-            # out may be a list of pair keys (e.g., ["AAA/USDT__BBB/USDT"])
             if isinstance(out, list):
                 produced_pairs = out
         else:
-            # Mode 2: CSV symbols → generate all combinations and save
+            # CSV symbols → generate all combinations and save
             if not pairs:
                 syms = symbols
                 pairs = [(syms[i], syms[j]) for i in range(len(syms)) for j in range(i + 1, len(syms))]
             res = _spread.compute_features_for_pairs(
                 raw_df=ohlcv, pairs=pairs, beta_window=beta_window, z_window=z_window
             )
-            # Save each pair to its own folder
             for pk, df in res.items():
                 safe = pk.replace("/", "_")
                 pair_dir = FEATURES_DIR / safe
@@ -278,7 +274,7 @@ def step_features(symbols_arg: str, beta_window: int, z_window: int):
                 df.to_parquet(pair_dir / "features.parquet", index=False)
                 produced_pairs.append(pk)
     else:
-        # Minimal internal fallback (should rarely be needed)
+        # Minimal internal fallback
         print("[features] WARNING: features.spread not available; using minimal internal implementation.")
         piv = ohlcv.pivot(index="ts", columns="symbol", values="close").sort_index()
         if not pairs:
@@ -297,7 +293,7 @@ def step_features(symbols_arg: str, beta_window: int, z_window: int):
         def _zscore(s: pd.Series, win: int):
             mu = s.rolling(win).mean()
             sd = s.rolling(win).std()
-            return (s - mu) / sd
+            return (s - mu) / (sd + 1e-12)
 
         for (a, b) in tqdm(pairs, desc="Features(fallback)"):
             if a not in piv.columns or b not in piv.columns:
@@ -343,7 +339,7 @@ def step_dataset(pairs_manifest: str, label_type: str, z_th: float, lag_features
     Writes data/datasets/pairs/<A__B>__ds.parquet and data/datasets/_manifest.json
     """
     if not HAS_LABELS:
-        raise SystemExit("features.labels not available. Please add features/labels.py with build_datasets_for_manifest()")
+        raise SystemExit("features.labels not available. Please add features/labels.py with build_datasets_for_manifest().")
     cfg = DatasetBuildConfig(label_type=label_type, zscore_threshold=float(z_th),
                              lag_features=int(lag_features), horizon=int(horizon))
     man = build_datasets_for_manifest(
@@ -395,25 +391,26 @@ def step_backtest(use_dataset: bool, signals_from: str, proba_threshold: float, 
     print(f"[backtest] summary → {BACKTEST_DIR / '_summary.json'}")
 
 
-def step_select(summary_path: str, registry_out: str, sharpe_min: float, maxdd_max: float, top_k: int):
+def step_select(summary_path: str, registry_out: str, sharpe_min: float, maxdd_max: float, top_k: int,
+                require_oof: bool = False, min_auc: Optional[float] = None,
+                min_rows: Optional[int] = None, max_per_symbol: Optional[int] = None):
     """
     Champion selection using models/select.py if available; otherwise a simple fallback.
     """
     # Try the richer selector
     try:
-        from models.select import select_champions as _select
-        # optionally pass train report for extra filters (uncomment thresholds if you want them now)
+        from models.select import select_champions as _select  # local import to avoid hard dep
         _select(
             summary_path=summary_path,
             registry_out=registry_out,
             sharpe_min=sharpe_min,
             maxdd_max=maxdd_max,
             top_k=top_k,
-            require_oof=False,             # set True to force OOF-backed pairs only
+            require_oof=require_oof,
             train_report_path=str(MODELS_DIR / "_train_report.json"),
-            min_auc=None,                  # e.g., 0.52 to filter weak AUC
-            min_rows=None,                 # e.g., 400 to filter tiny datasets
-            max_per_symbol=None,           # e.g., 2 to diversify per base symbol
+            min_auc=min_auc,
+            min_rows=min_rows,
+            max_per_symbol=max_per_symbol,
         )
         print(f"[select] registry → {registry_out}")
         return
@@ -481,7 +478,7 @@ def build_argparser() -> argparse.ArgumentParser:
                     choices=["z_threshold", "revert_direction"])
     ap.add_argument("--zscore-threshold", type=float, default=1.5)
     ap.add_argument("--lag-features", type=int, default=1)
-    ap.add_argument("--horizon", type=int, default=0)
+    ap.add_argument("--horizon", type=int, default=0)  # fixed: was type[int]
 
     # train
     ap.add_argument("--use-dataset", action="store_true")
@@ -493,6 +490,7 @@ def build_argparser() -> argparse.ArgumentParser:
 
     # backtest
     ap.add_argument("--signals-from", type=str, default="oof")
+    ap.add_argument("--fee-rate", type=float, default=0.0005)
 
     # select/promote
     ap.add_argument("--summary-path", type=str, default=str(BACKTEST_DIR / "_summary.json"))
@@ -502,6 +500,16 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--top-k", type=int, default=20)
     ap.add_argument("--production-map-out", type=str, default=str(MODELS_DIR / "production_map.json"))
     ap.add_argument("--registry-in", type=str, default=str(MODELS_DIR / "registry.json"))
+
+    # selection advanced filters (optional)
+    ap.add_argument("--require-oof", action="store_true",
+                    help="Only keep pairs whose backtest used OOF probabilities")
+    ap.add_argument("--min-auc", type=float, default=None,
+                    help="Filter out pairs whose train AUC is below this value (requires _train_report.json)")
+    ap.add_argument("--min-rows", type=int, default=None,
+                    help="Filter out pairs with too few dataset rows (requires _train_report.json)")
+    ap.add_argument("--max-per-symbol", type=int, default=None,
+                    help="Limit how many pairs per base symbol (diversity constraint)")
     return ap
 
 
@@ -528,10 +536,17 @@ def main():
                    args.early_stopping_rounds, args.proba_threshold)
 
     elif mode == "backtest":
-        step_backtest(args.use_dataset, args.signals_from, args.proba_threshold, args.fee_rate if hasattr(args, "fee_rate") else 0.0005)
+        step_backtest(args.use_dataset, args.signals_from, args.proba_threshold, args.fee_rate)
 
     elif mode == "select":
-        step_select(args.summary_path, args.registry_out, args.sharpe_min, args.maxdd_max, args.top_k)
+        step_select(
+            args.summary_path, args.registry_out,
+            args.sharpe_min, args.maxdd_max, args.top_k,
+            require_oof=args.require_oof,
+            min_auc=args.min_auc,
+            min_rows=args.min_rows,
+            max_per_symbol=args.max_per_symbol,
+        )
 
     elif mode == "promote":
         step_promote(args.registry_in, args.production_map_out)
