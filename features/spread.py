@@ -41,7 +41,7 @@ def rolling_ols(y: pd.Series, x: pd.Series, window: int, min_periods: Optional[i
     y_mean = y.rolling(window, min_periods=minp).mean()
     cov = (x * y).rolling(window, min_periods=minp).mean() - x_mean * y_mean
     var = x.rolling(window, min_periods=minp).var()
-    beta = cov / var
+    beta = cov / (var + 1e-12)
     alpha = y_mean - beta * x_mean
     return beta.rename("beta"), alpha.rename("alpha")
 
@@ -56,12 +56,34 @@ def rolling_zscore(s: pd.Series, window: int, min_periods: Optional[int] = None)
     return ((s - mu) / (sd + 1e-12)).rename("z")
 
 
+def _guess_time_index(series: pd.Series) -> pd.DatetimeIndex:
+    """
+    Convert a time-like series to UTC DatetimeIndex.
+    Tries ns/ms/s based on magnitude if the dtype is numeric.
+    """
+    vals = pd.to_numeric(series, errors="coerce")
+    if np.isfinite(vals).any():
+        sample = float(np.nanmedian(vals.iloc[: min(10, len(vals))]))
+        unit: Optional[str] = None
+        if sample > 1e14:      # ~ ns
+            unit = "ns"
+        elif sample > 1e11:    # ~ ms
+            unit = "ms"
+        elif sample > 1e9:     # ~ s
+            unit = "s"
+        # else let pandas infer
+        idx = pd.to_datetime(series, unit=unit, utc=True, errors="coerce") if unit else pd.to_datetime(series, utc=True, errors="coerce")
+    else:
+        idx = pd.to_datetime(series, utc=True, errors="coerce")
+    return pd.DatetimeIndex(idx)
+
+
 def build_close_matrix(df: pd.DataFrame) -> pd.DataFrame:
     """
     Normalize raw OHLCV into a wide 'close' matrix: index=datetime, columns=symbol.
     Supports:
       - MultiIndex columns with 'close' on the last level,
-      - Long format with columns ['symbol','close'] (+ 'timestamp' optional),
+      - Long format with columns ['symbol','close'] and any time column among: ['ts','timestamp','time','date','datetime'],
       - Already-wide frames.
     """
     # Case 1: MultiIndex columns (try to pick 'close' from the last level)
@@ -70,30 +92,48 @@ def build_close_matrix(df: pd.DataFrame) -> pd.DataFrame:
         last_level = names[-1] if names else None
         if last_level:
             try:
-                return df.xs("close", axis=1, level=last_level).sort_index()
+                out = df.xs("close", axis=1, level=last_level)
+                return out.sort_index()
             except (KeyError, ValueError):
                 pass
         try:
-            return df.xs("close", axis=1, level=-1).sort_index()
+            out = df.xs("close", axis=1, level=-1)
+            return out.sort_index()
         except (KeyError, ValueError):
             pass
 
     # Case 2: Long format
     lower = {str(c).lower(): c for c in df.columns}
     if "symbol" in lower and "close" in lower:
-        # detect datetime index
-        if not isinstance(df.index, pd.DatetimeIndex):
-            ts_col = lower.get("timestamp")
-            if ts_col is not None:
-                idx = pd.to_datetime(df[ts_col], unit="ms", errors="coerce")
-            else:
-                idx = pd.to_datetime(df.index, errors="coerce")
+        # detect a time column; prefer common names
+        time_col = None
+        for cand in ("ts", "timestamp", "time", "date", "datetime"):
+            if cand in lower:
+                time_col = lower[cand]
+                break
+
+        if time_col is not None:
+            idx = _guess_time_index(df[time_col])
         else:
-            idx = df.index
+            # fallback: try to use current index as time
+            if isinstance(df.index, pd.DatetimeIndex):
+                idx = df.index
+            else:
+                idx = pd.to_datetime(df.index, utc=True, errors="coerce")
+
         wide = df.set_index(idx).pivot(columns=lower["symbol"], values=lower["close"])
+        wide.index.name = "ts"
         return wide.sort_index()
 
     # Case 3: already wide
+    if not isinstance(df.index, pd.DatetimeIndex):
+        # try to coerce the index if it looks like time-like integers
+        try:
+            df = df.copy()
+            df.index = _guess_time_index(df.index.to_series())
+        except Exception:
+            df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
+    df.index.name = "ts"
     return df.sort_index()
 
 
