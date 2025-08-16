@@ -388,7 +388,7 @@ def step_backtest(use_dataset: bool, signals_from: str, proba_threshold: float, 
         fee_rate=fee_rate,
     )
     (BACKTEST_DIR / "_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[backtest] summary → {BACKTEST_DIR / '_summary.json'}")
+    # quiet: runner already prints the summary path
 
 
 def step_select(summary_path: str, registry_out: str, sharpe_min: float, maxdd_max: float, top_k: int,

@@ -148,7 +148,9 @@ def _compute_pair_backtest(
     df["rb"] = df["lb"].diff().fillna(0.0).astype("float64")
 
     # use beta shifted by 1 bar (no look-ahead)
-    df["beta_lag"] = df["beta"].shift(1).replace([np.inf, -np.inf], np.nan).fillna(method="ffill")
+    # forward-fill без устаревшего параметра method; если всё NaN — подставим 1.0
+    beta_lag = df["beta"].shift(1).replace([np.inf, -np.inf], np.nan)
+    df["beta_lag"] = beta_lag.ffill().fillna(1.0)
     df["beta_lag"] = df["beta_lag"].fillna(1.0).astype("float64")
 
     # signal direction from z (mean-reversion): if z>entry -> short spread => sign=-1; if z<-entry -> long spread => sign=+1
