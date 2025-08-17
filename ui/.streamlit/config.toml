@@ -1,6 +1,11 @@
 # .streamlit/config.toml
 [server]
-address = "127.0.0.1"
+address = "0.0.0.0"
 port = 8501
-enableCORS = false
-headless = false
+headless = true
+enableCORS = true
+enableXsrfProtection = true
+
+[browser]
+serverAddress = "127.0.0.1"
+gatherUsageStats = false

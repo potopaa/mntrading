@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   minio:
     image: minio/minio:latest
@@ -34,7 +32,7 @@ services:
     restart: "no"
 
   mlflow:
-    image: python:3.12-slim
+    build: .
     container_name: mntrading-mlflow
     depends_on:
       - setup-minio
@@ -44,19 +42,20 @@ services:
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
-    command: >
-      bash -lc "pip install --no-cache-dir mlflow boto3 &&
-                mlflow server
-                  --host 0.0.0.0
-                  --port ${MLFLOW_PORT}
-                  --backend-store-uri sqlite:////app/mlflow.db
-                  --artifacts-destination s3://${MINIO_BUCKET}
-                  --gunicorn-opts '--timeout 300'"
+      MINIO_BUCKET: ${MINIO_BUCKET}
+    command: [
+      "mlflow","server",
+      "--host","0.0.0.0",
+      "--port","5000",
+      "--backend-store-uri","sqlite:////app/mlflow/mlflow.db",
+      "--artifacts-destination","s3://${MINIO_BUCKET}",
+      "--gunicorn-opts","--timeout 300"
+    ]
     ports:
       - "${MLFLOW_PORT}:5000"
     volumes:
-      - ./mlflow.db:/app/mlflow.db
-      - ./mlruns:/app/mlruns
+      - ./mlflow:/app/mlflow
+
 
   app:
     build: .
@@ -69,7 +68,7 @@ services:
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
-      MLFLOW_REGISTER: "0"
+      MLFLOW_REGISTER: "1"
     volumes:
       - .:/app
       - ./data:/app/data
@@ -80,18 +79,28 @@ services:
     container_name: mntrading-ui
     depends_on:
       - app
+    restart: unless-stopped
     environment:
       MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
       MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
+      STREAMLIT_SERVER_HEADLESS: "true"
+      STREAMLIT_BROWSER_GATHERUSAGESTATS: "false"
     command: >
-      bash -lc "streamlit run ui/streamlit_app.py
-                --server.address 0.0.0.0
-                --server.port ${STREAMLIT_PORT}
-                --browser.serverAddress 127.0.0.1
-                --browser.gatherUsageStats false"
+      bash -lc "
+        set -e;
+        APP_PATH='';
+        for p in ui/streamlit_app.py mntrading/ui/streamlit_app.py; do
+          if [ -f \"$$p\" ]; then APP_PATH=\"$$p\"; break; fi
+        done
+        if [ -z \"$$APP_PATH\" ]; then echo '[ui] streamlit_app.py not found'; ls -la; exit 1; fi
+        echo \"[ui] starting $$APP_PATH\";
+        exec streamlit run \"$$APP_PATH\" \
+          --server.address 0.0.0.0 \
+          --server.port ${STREAMLIT_PORT}
+      "
     ports:
       - "${STREAMLIT_PORT}:${STREAMLIT_PORT}"
     volumes:
