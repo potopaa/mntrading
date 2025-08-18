@@ -38,11 +38,12 @@ services:
       - setup-minio
     working_dir: /app
     environment:
-      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
-      MINIO_BUCKET: ${MINIO_BUCKET}
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-admin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-adminadmin}
+      AWS_DEFAULT_REGION: us-east-1
+      MINIO_BUCKET: ${MINIO_BUCKET:-mlflow}
+      MLFLOW_ARTIFACTS_DESTINATION: s3://${MINIO_BUCKET:-mlflow}/experiments
     command: [
       "mlflow","server",
       "--host","0.0.0.0",
@@ -83,9 +84,11 @@ services:
     environment:
       MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
       MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL}
+      MLFLOW_ARTIFACTS_DESTINATION: s3://${MINIO_BUCKET}/experiments
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
+      MINIO_BUCKET: ${MINIO_BUCKET:-mlflow}
       STREAMLIT_SERVER_HEADLESS: "true"
       STREAMLIT_BROWSER_GATHERUSAGESTATS: "false"
     command: >
