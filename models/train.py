@@ -309,13 +309,15 @@ def train_baseline(
     if not pairs:
         return {"pairs_trained": 0, "pairs_total": 0, "items": [], "reason": "no_pairs_found"}
 
-    # MLflow: не обязателен, но попробуем
+    # MLflow: не обязателен, но попробуем (+ явный debug)
     try:
         import mlflow
-        _ensure_mlflow_experiment()
+        exp_id = _ensure_mlflow_experiment()
+        print(f"[mlflow] tracking_uri={mlflow.get_tracking_uri()} exp_id={exp_id}")
         mlflow_ok = True
-    except Exception:
+    except Exception as e:
         mlflow_ok = False
+        print(f"[mlflow] disabled: {e!r}")
 
     results = []
 
@@ -337,6 +339,16 @@ def train_baseline(
         if len(X) < max(100, n_splits * 50) or pd.Series(y).nunique() < 2:
             results.append({"pair": pair, "skipped": True, "reason": "too_small_or_constant"})
             continue
+
+        # MLflow: если был отключен, пробуем реинициализировать на лету
+        if not mlflow_ok:
+            try:
+                import mlflow
+                exp_id = _ensure_mlflow_experiment()
+                print(f"[mlflow] reinit ok for pair={pair}, exp_id={exp_id}")
+                mlflow_ok = True
+            except Exception as e:
+                print(f"[mlflow] still disabled: {e!r}")
 
         metrics_by_model, models_full, oof = _fit_eval_all(
             X, y, n_splits=n_splits, gap=gap, max_train_size=max_train_size,
@@ -395,7 +407,10 @@ def train_baseline(
                         for k, v in mm.items():
                             vv = 0.0 if (isinstance(v, float) and math.isnan(v)) else float(v)
                             mlflow.log_metric(f"{mn}_{k}", vv)
-                    mlflow.log_metric("champion_auc", 0.0 if math.isnan(champ_metrics.get("auc", float("nan"))) else float(champ_metrics.get("auc", 0.0)))
+                    mlflow.log_metric(
+                        "champion_auc",
+                        0.0 if math.isnan(champ_metrics.get("auc", float("nan"))) else float(champ_metrics.get("auc", 0.0))
+                    )
 
                     # log models
                     for name, est in models_full.items():

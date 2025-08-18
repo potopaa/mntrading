@@ -157,13 +157,31 @@ with tabs[0]:
     with c1:
         st.caption("1) Screen (1h) → pairs JSON")
         if st.button("Screen", key="btn_screen"):
-            cmd = [py(), str(ROOT / "screen_pairs.py"),
-                   "--universe", universe, "--quote", quote, "--source", "ccxt", "--exchange", "binance",
-                   "--since-utc", since_utc or "2025-01-01",
-                   "--min-samples", "200", "--corr-threshold", str(corr_thr),
-                   "--alpha", str(alpha), "--top-k", str(top_k)]
-            st.info("Screening pairs...")
-            st.success("done" if run(cmd) == 0 else "failed")
+            # 1) Сформируем список символов типа BTC/USDT,ETH/USDT,...
+            symbols_csv = ",".join(
+                [f"{s.strip().upper()}/{quote}" for s in universe.split(",") if s.strip()]
+            )
+            # 2) Гарантируем свежий ohlcv.parquet (1h)
+            cmd_ing = [py(), str(ROOT / "main.py"), "--mode", "ingest",
+                       "--symbols", symbols_csv, "--timeframe", "1h", "--limit", str(limit)]
+            if since_utc:
+                cmd_ing += ["--since-utc", since_utc]
+            st.info("Ingesting 1h OHLCV for screening...")
+            rc_ing = run(cmd_ing)
+
+            # 3) Запускаем скринер с флагами, которые он действительно поддерживает
+            if rc_ing == 0:
+                cmd = [py(), str(ROOT / "screen_pairs.py"),
+                       "--raw-parquet", str(ROOT / "data" / "raw" / "ohlcv.parquet"),
+                       "--symbols", symbols_csv,
+                       "--min-bars", "200",
+                       "--min-corr", str(corr_thr),
+                       "--max-pvalue", str(alpha),
+                       "--top-k", str(top_k)]
+                st.info("Screening pairs...")
+                st.success("done" if run(cmd) == 0 else "failed")
+            else:
+                st.error("Ingest failed — screening skipped")
 
     with c2:
         st.caption("2) Ingest (5m) → data/raw/ohlcv.parquet")
