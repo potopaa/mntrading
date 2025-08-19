@@ -57,6 +57,29 @@ services:
     volumes:
       - ./mlflow:/app/mlflow
 
+  # NEW: FastAPI server (см. api/server.py)
+  api:
+    build: .
+    container_name: mntrading-api
+    depends_on:
+      - mlflow
+    environment:
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
+      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
+    command: >
+      bash -lc "
+        exec uvicorn api.server:app --host 0.0.0.0 --port 8000
+      "
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    volumes:
+      - .:/app
+      - ./data:/app/data
+      - ./mlruns:/app/mlruns
 
   app:
     build: .
@@ -74,6 +97,7 @@ services:
       - .:/app
       - ./data:/app/data
       - ./mlruns:/app/mlruns
+    command: ["bash","-lc","tail -f /dev/null"]
 
   streamlit:
     build: .
@@ -84,23 +108,18 @@ services:
     environment:
       MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
       MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL}
-      MLFLOW_ARTIFACTS_DESTINATION: s3://${MINIO_BUCKET}/experiments
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
-      MINIO_BUCKET: ${MINIO_BUCKET:-mlflow}
-      STREAMLIT_SERVER_HEADLESS: "true"
-      STREAMLIT_BROWSER_GATHERUSAGESTATS: "false"
+      STREAMLIT_PORT: ${STREAMLIT_PORT}
     command: >
       bash -lc "
-        set -e;
-        APP_PATH='';
-        for p in ui/streamlit_app.py mntrading/ui/streamlit_app.py; do
-          if [ -f \"$$p\" ]; then APP_PATH=\"$$p\"; break; fi
-        done
-        if [ -z \"$$APP_PATH\" ]; then echo '[ui] streamlit_app.py not found'; ls -la; exit 1; fi
-        echo \"[ui] starting $$APP_PATH\";
-        exec streamlit run \"$$APP_PATH\" \
+        APP_PATH=ui/streamlit_app.py;
+        if [ ! -f "$APP_PATH" ]; then
+          echo '[ui] streamlit_app.py not found'; ls -la; exit 1;
+        fi
+        echo "[ui] starting $APP_PATH";
+        exec streamlit run "$APP_PATH" \
           --server.address 0.0.0.0 \
           --server.port ${STREAMLIT_PORT}
       "

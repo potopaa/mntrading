@@ -1,6 +1,5 @@
-from .spread import compute_spread, rolling_ols
+from .spread import compute_features_for_pairs
 
 __all__ = [
     "compute_features_for_pairs",
-    "rolling_ols",
 ]

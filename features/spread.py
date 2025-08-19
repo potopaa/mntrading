@@ -196,7 +196,7 @@ def _build_features_for_pair(piv: pd.DataFrame, a: str, b: str,
 
 # ----------------------------- Public entry ----------------------------- #
 
-def c(
+def compute_features_for_pairs(
     *,
     # file-based variant
     pairs_json: Optional[Union[str, Path]] = None,

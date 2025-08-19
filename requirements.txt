@@ -7,7 +7,7 @@ fastparquet>=2024.2.0
 # modeling
 scikit-learn>=1.5
 lightgbm>=4.3
-statsmodels>=0.14  # для optional screen_pairs
+statsmodels>=0.14
 
 # ops & logging
 mlflow>=2.14
@@ -20,9 +20,13 @@ tqdm>=4.66
 requests>=2.32
 python-dotenv>=1.0
 
-# exchange (если нужен CCXT для инжеста)
+
 ccxt>=4.3
 
 # UI
 streamlit>=1.35
 plotly>=5.22
+
+# API
+fastapi>=0.111
+uvicorn[standard]>=0.30
