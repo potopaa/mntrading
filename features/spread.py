@@ -1,253 +1,263 @@
 # -*- coding: utf-8 -*-
 """
-Feature engineering for pairs trading:
-- Rolling OLS beta/alpha between two instruments (a,b)
-- Spread = a - (beta * b + alpha)
-- Z-score over the spread
-- A dual-interface helper `compute_features_for_pairs`:
-    Mode A (in-memory):  pass raw_df + pairs -> Dict[pair_key, DataFrame]
-    Mode B (file IO):    pass pairs_json + raw_parquet + out_dir -> List[pair_key], and it saves each pair's features to:
-                         <out_dir>/<A__B>/features.parquet
-This design keeps compatibility with both older and newer callers.
+Feature builder for pair spreads.
+
+Public entry:
+    compute_features_for_pairs(...)
+
+Supports two calling styles:
+
+1) File-based (used by main.py when --symbols points to screened_pairs_*.json):
+    compute_features_for_pairs(
+        pairs_json: str | Path,
+        raw_parquet: str | Path,
+        out_dir: str | Path,
+        beta_window: int,
+        z_window: int,
+    ) -> List[str]   # writes per-pair features.parquet and returns list of pair keys
+
+2) In-memory (used by main.py when --symbols is CSV; main.py writes parquet itself):
+    compute_features_for_pairs(
+        raw_df: pd.DataFrame,
+        pairs: List[Tuple[str, str]],
+        beta_window: int,
+        z_window: int,
+    ) -> Dict[str, pd.DataFrame]
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Tuple, Optional, Union
 import json
+import math
 
 import numpy as np
 import pandas as pd
+try:
+    from tqdm import tqdm
+except Exception:  # tqdm is optional
+    def tqdm(x, **kwargs):
+        return x
 
 
-# -------------------------- Low-level utils --------------------------
-def compute_spread(df: pd.DataFrame, a: str, b: str) -> pd.Series:
+# ----------------------------- Pair parsing helpers ----------------------------- #
+
+def _decode_pair_key(s: str) -> Tuple[str, str]:
     """
-    Legacy helper: simple log-spread between a and b (close prices).
-    This is kept for compatibility with any older code that might import it.
+    Accepts:
+      - 'BTC_USDT__ETH_USDT'
+      - 'BTC/USDT,ETH/USDT'
+      - 'BTC/USDT__ETH/USDT'
+    Returns: ('BTC/USDT', 'ETH/USDT')
     """
-    if a not in df.columns or b not in df.columns:
-        return pd.Series(dtype=float)
-    return (np.log(df[a]) - np.log(df[b])).rename("spread")
+    s = (s or "").strip()
+    if "__" in s:
+        a, b = s.split("__", 1)
+        return a.replace("_", "/"), b.replace("_", "/")
+    if "," in s:
+        a, b = [x.strip() for x in s.split(",", 1)]
+        return a, b
+    raise ValueError(f"Cannot decode pair string: {s!r}")
 
 
-def rolling_ols(y: pd.Series, x: pd.Series, window: int, min_periods: Optional[int] = None) -> Tuple[pd.Series, pd.Series]:
+def _pairs_from_any(obj: Any) -> List[Tuple[str, str]]:
     """
-    Cheap rolling OLS approximation (beta, alpha) without statsmodels.
+    Normalize *anything* (dict/list/str/path) into list[(a,b)] with symbols 'XXX/USDT'.
+    Supported shapes:
+      - {"pairs": [...]} or {"data": [...]} or {"results": [...]} — elements may be dict/list/str
+      - [ {"a": "...", "b": "..."}, {"pair": "BTC_USDT__ETH_USDT"}, ["BTC/USDT","ETH/USDT"], "BTC_USDT__ETH_USDT", ... ]
+      - path to .json containing any of the above
+      - single string with comma-separated pair keys
     """
-    minp = min_periods or window
-    x_mean = x.rolling(window, min_periods=minp).mean()
-    y_mean = y.rolling(window, min_periods=minp).mean()
-    cov = (x * y).rolling(window, min_periods=minp).mean() - x_mean * y_mean
-    var = x.rolling(window, min_periods=minp).var()
-    beta = cov / (var + 1e-12)
-    alpha = y_mean - beta * x_mean
-    return beta.rename("beta"), alpha.rename("alpha")
-
-
-def rolling_zscore(s: pd.Series, window: int, min_periods: Optional[int] = None) -> pd.Series:
-    """
-    Rolling z-score with ddof=0 to match trading usage.
-    """
-    minp = min_periods or window
-    mu = s.rolling(window, min_periods=minp).mean()
-    sd = s.rolling(window, min_periods=minp).std(ddof=0)
-    return ((s - mu) / (sd + 1e-12)).rename("z")
-
-
-def _guess_time_index(series: pd.Series) -> pd.DatetimeIndex:
-    """
-    Convert a time-like series to UTC DatetimeIndex.
-    Tries ns/ms/s based on magnitude if the dtype is numeric.
-    """
-    vals = pd.to_numeric(series, errors="coerce")
-    if np.isfinite(vals).any():
-        sample = float(np.nanmedian(vals.iloc[: min(10, len(vals))]))
-        unit: Optional[str] = None
-        if sample > 1e14:      # ~ ns
-            unit = "ns"
-        elif sample > 1e11:    # ~ ms
-            unit = "ms"
-        elif sample > 1e9:     # ~ s
-            unit = "s"
-        # else let pandas infer
-        idx = pd.to_datetime(series, unit=unit, utc=True, errors="coerce") if unit else pd.to_datetime(series, utc=True, errors="coerce")
-    else:
-        idx = pd.to_datetime(series, utc=True, errors="coerce")
-    return pd.DatetimeIndex(idx)
-
-
-def build_close_matrix(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normalize raw OHLCV into a wide 'close' matrix: index=datetime, columns=symbol.
-    Supports:
-      - MultiIndex columns with 'close' on the last level,
-      - Long format with columns ['symbol','close'] and any time column among: ['ts','timestamp','time','date','datetime'],
-      - Already-wide frames.
-    """
-    # Case 1: MultiIndex columns (try to pick 'close' from the last level)
-    if isinstance(df.columns, pd.MultiIndex):
-        names = df.columns.names or []
-        last_level = names[-1] if names else None
-        if last_level:
+    # If it's path to JSON — load and recurse
+    if isinstance(obj, (str, Path)):
+        p = Path(str(obj))
+        # path to JSON file
+        if p.suffix.lower() == ".json" and p.exists():
             try:
-                out = df.xs("close", axis=1, level=last_level)
-                return out.sort_index()
-            except (KeyError, ValueError):
+                j = json.loads(p.read_text(encoding="utf-8"))
+                return _pairs_from_any(j)
+            except Exception:
+                # not json or unreadable -> fall back to string parsing
                 pass
-        try:
-            out = df.xs("close", axis=1, level=-1)
-            return out.sort_index()
-        except (KeyError, ValueError):
-            pass
 
-    # Case 2: Long format
-    lower = {str(c).lower(): c for c in df.columns}
-    if "symbol" in lower and "close" in lower:
-        # detect a time column; prefer common names
-        time_col = None
-        for cand in ("ts", "timestamp", "time", "date", "datetime"):
-            if cand in lower:
-                time_col = lower[cand]
-                break
+    # unwrap container
+    if isinstance(obj, dict):
+        items = obj.get("pairs") or obj.get("data") or obj.get("results") or []
+    elif isinstance(obj, list):
+        items = obj
+    else:
+        s = str(obj).strip()
+        items = [x.strip() for x in s.split(",") if x.strip()] if s else []
 
-        if time_col is not None:
-            idx = _guess_time_index(df[time_col])
-        else:
-            # fallback: try to use current index as time
-            if isinstance(df.index, pd.DatetimeIndex):
-                idx = df.index
-            else:
-                idx = pd.to_datetime(df.index, utc=True, errors="coerce")
+    out: List[Tuple[str, str]] = []
+    for it in items:
+        a = b = None
+        if isinstance(it, dict):
+            a = it.get("a") or it.get("sym_a") or it.get("left") or it.get("x")
+            b = it.get("b") or it.get("sym_b") or it.get("right") or it.get("y")
+            if not (a and b):
+                pair_key = it.get("pair") or it.get("pair_key") or it.get("id") or ""
+                if pair_key:
+                    try:
+                        a, b = _decode_pair_key(pair_key)
+                    except Exception:
+                        a = b = None
+        elif isinstance(it, (list, tuple)) and len(it) >= 2:
+            a, b = str(it[0]), str(it[1])
+        elif isinstance(it, str):
+            try:
+                a, b = _decode_pair_key(it)
+            except Exception:
+                a = b = None
 
-        wide = df.set_index(idx).pivot(columns=lower["symbol"], values=lower["close"])
-        wide.index.name = "ts"
-        return wide.sort_index()
-
-    # Case 3: already wide
-    if not isinstance(df.index, pd.DatetimeIndex):
-        # try to coerce the index if it looks like time-like integers
-        try:
-            df = df.copy()
-            df.index = _guess_time_index(df.index.to_series())
-        except Exception:
-            df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
-    df.index.name = "ts"
-    return df.sort_index()
-
-
-def compute_pair_features_from_prices(
-    px: pd.DataFrame,
-    a: str,
-    b: str,
-    beta_window: int = 300,
-    z_window: int = 300,
-    min_periods: Optional[int] = None
-) -> pd.DataFrame:
-    """
-    Build pair features (a,b): beta, alpha, spread, z.
-    Returns a DataFrame with columns:
-      ['ts','a','b','beta','alpha','spread','z','pair']
-    """
-    if a not in px.columns or b not in px.columns:
-        return pd.DataFrame()
-
-    df = px[[a, b]].dropna().copy()
-    df.columns = ["pa", "pb"]
-
-    beta, alpha = rolling_ols(df["pa"], df["pb"], beta_window, min_periods)
-    spread = (df["pa"] - (beta * df["pb"] + alpha)).rename("spread")
-    z = rolling_zscore(spread, z_window, min_periods)
-
-    out = pd.concat([df, beta, alpha, spread, z], axis=1).dropna()
-    out.index.name = "ts"
-    out = out.reset_index()
-    out["a"] = a
-    out["b"] = b
-    out["pair"] = f"{a}__{b}"
-    # rename for consistency: original price columns are not needed downstream
-    out = out.rename(columns={"pa": "a_close", "pb": "b_close"})
+        if a and b:
+            out.append((a, b))
     return out
 
 
-# ------------------- Dual-interface orchestrator -------------------
-def compute_features_for_pairs(
-    raw_df: Optional[pd.DataFrame] = None,
-    pairs: Optional[List[Tuple[str, str]]] = None,
-    beta_window: int = 300,
-    z_window: int = 300,
-    min_periods: Optional[int] = None,
+# ----------------------------- Core computations ----------------------------- #
+
+def _rolling_beta_alpha(y: pd.Series, x: pd.Series, win: int) -> Tuple[pd.Series, pd.Series]:
+    """
+    Fast rolling OLS via moments:
+        beta = Cov(x,y)/Var(x)
+        alpha = E[y] - beta * E[x]
+    """
+    x_mean = x.rolling(win).mean()
+    y_mean = y.rolling(win).mean()
+    cov = (x * y).rolling(win).mean() - x_mean * y_mean
+    var = x.rolling(win).var()
+    beta = cov / (var.replace(0.0, np.nan))
+    alpha = y_mean - beta * x_mean
+    return beta, alpha
+
+
+def _zscore(s: pd.Series, win: int) -> pd.Series:
+    mu = s.rolling(win).mean()
+    sd = s.rolling(win).std()
+    return (s - mu) / (sd + 1e-12)
+
+
+def _ensure_ts_index(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize time column to UTC DatetimeIndex named 'ts'.
+    """
+    df = df.copy()
+    tcol = None
+    for c in ("ts", "timestamp", "time", "date", "datetime"):
+        if c in df.columns:
+            tcol = c
+            break
+    if tcol is None:
+        raise ValueError("Raw OHLCV must contain a time column (ts/timestamp/time/date/datetime).")
+    ts = pd.to_datetime(df[tcol], utc=True, errors="coerce")
+    df = df.assign(ts=ts).dropna(subset=["ts"]).set_index("ts").sort_index()
+    return df
+
+
+def _pivot_close(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Raw dataframe -> pivot prices by symbol, index ts, value close.
+    """
+    for col in ("symbol", "close"):
+        if col not in df_raw.columns:
+            raise ValueError(f"Raw OHLCV must contain '{col}' column.")
+    df = _ensure_ts_index(df_raw)
+    piv = df.pivot(columns="symbol", values="close")
+    return piv
+
+
+def _build_features_for_pair(piv: pd.DataFrame, a: str, b: str,
+                             beta_window: int, z_window: int) -> Optional[pd.DataFrame]:
+    if a not in piv.columns or b not in piv.columns:
+        return None
+    df = piv[[a, b]].dropna().rename(columns={a: "pa", b: "pb"})
+    if len(df) < max(beta_window, z_window) + 5:
+        return None
+
+    beta, alpha = _rolling_beta_alpha(df["pa"], df["pb"], beta_window)
+    spread = df["pa"] - (beta * df["pb"] + alpha)
+    z = _zscore(spread, z_window)
+    out = pd.DataFrame(
+        {
+            "ts": df.index,
+            "a": df["pa"].values,
+            "b": df["pb"].values,
+            "beta": beta.values,
+            "alpha": alpha.values,
+            "spread": spread.values,
+            "z": z.values,
+        }
+    ).dropna().reset_index(drop=True)
+    return out
+
+
+# ----------------------------- Public entry ----------------------------- #
+
+def c(
     *,
+    # file-based variant
     pairs_json: Optional[Union[str, Path]] = None,
     raw_parquet: Optional[Union[str, Path]] = None,
     out_dir: Optional[Union[str, Path]] = None,
-) -> Union[Dict[str, pd.DataFrame], List[str]]:
+    # in-memory variant
+    raw_df: Optional[pd.DataFrame] = None,
+    pairs: Optional[Iterable[Tuple[str, str]]] = None,
+    # common params
+    beta_window: int = 1000,
+    z_window: int = 300,
+):
     """
-    Two modes:
-
-    Mode A (in-memory):
-        compute_features_for_pairs(raw_df=df, pairs=[("AAA/USDT","BBB/USDT"), ...], ...)
-      → returns dict {'AAA/USDT__BBB/USDT': DataFrame, ...}
-
-    Mode B (file IO):
-        compute_features_for_pairs(pairs_json=<path>, raw_parquet=<path>, out_dir=<dir>, ...)
-      → saves each pair to <out_dir>/<A__B>/features.parquet and returns list of pair keys
+    Either:
+      - file-based: pass pairs_json + raw_parquet + out_dir -> returns List[str] of pair keys (and writes parquet)
+      - in-memory: pass raw_df + pairs -> returns Dict[str, DataFrame] (caller writes parquet)
     """
-    # File-based mode
-    if pairs_json is not None or raw_parquet is not None or out_dir is not None:
-        if not (pairs_json and raw_parquet and out_dir):
-            raise ValueError("File-based mode requires pairs_json, raw_parquet and out_dir")
+    is_file_mode = pairs_json is not None or raw_parquet is not None or out_dir is not None
+    is_mem_mode = raw_df is not None or pairs is not None
 
-        p_json = Path(pairs_json)
-        p_raw = Path(raw_parquet)
-        out = Path(out_dir)
-        out.mkdir(parents=True, exist_ok=True)
+    if is_file_mode and is_mem_mode:
+        raise ValueError("Pass either file-based args (pairs_json, raw_parquet, out_dir) OR in-memory args (raw_df, pairs).")
 
-        # load pairs from JSON
-        with p_json.open("r", encoding="utf-8") as f:
-            obj = json.load(f)
-        pair_list: List[Tuple[str, str]] = []
-        entries = obj.get("pairs") or []
-        for e in entries:
-            a = e.get("a") or e.get("A") or e.get("base") or e.get("x") or e.get("left")
-            b = e.get("b") or e.get("B") or e.get("quote") or e.get("y") or e.get("right")
-            if a and b:
-                pair_list.append((str(a), str(b)))
-        if not pair_list:
-            # allow strings like "AAA/USDT__BBB/USDT"
-            arr = obj.get("items") or obj.get("list") or []
-            for s in arr:
-                if isinstance(s, str) and "__" in s:
-                    a, b = s.split("__", 1)
-                    pair_list.append((a.replace("_", "/"), b.replace("_", "/")))
-        if not pair_list:
-            raise ValueError(f"No pairs found in {p_json}")
+    if is_file_mode:
+        if pairs_json is None or raw_parquet is None or out_dir is None:
+            raise ValueError("File-based mode requires pairs_json, raw_parquet, out_dir.")
+        pairs_list = _pairs_from_any(pairs_json)
+        if not pairs_list:
+            raise ValueError(f"No pairs parsed from {pairs_json}")
+        raw_path = Path(raw_parquet)
+        if not raw_path.exists():
+            raise FileNotFoundError(f"Raw parquet not found: {raw_path}")
+        out_path = Path(out_dir)
+        out_path.mkdir(parents=True, exist_ok=True)
 
-        # read raw parquet and build a close matrix
-        raw = pd.read_parquet(p_raw)
-        px = build_close_matrix(raw)
+        raw = pd.read_parquet(raw_path)
+        piv = _pivot_close(raw)
 
         produced: List[str] = []
-        for a, b in pair_list:
-            feat = compute_pair_features_from_prices(px, a, b, beta_window, z_window, min_periods)
-            if feat.empty:
+        for (a, b) in tqdm(pairs_list, desc="Features"):
+            df = _build_features_for_pair(piv, a, b, beta_window, z_window)
+            if df is None or df.empty:
                 continue
-            key_safe = f"{a.replace('/', '_')}__{b.replace('/', '_')}"
-            pair_dir = out / key_safe
+            pair_key = f"{a}__{b}"
+            safe = pair_key.replace("/", "_")
+            pair_dir = out_path / safe
             pair_dir.mkdir(parents=True, exist_ok=True)
-            feat.to_parquet(pair_dir / "features.parquet", index=False)
-            produced.append(f"{a}__{b}")
+            df.to_parquet(pair_dir / "features.parquet", index=False)
+            produced.append(pair_key)
+
         return produced
 
-    # In-memory mode
+    # in-memory
     if raw_df is None or pairs is None:
-        raise ValueError("Pass either (raw_df, pairs) or (pairs_json, raw_parquet, out_dir)")
-    px = build_close_matrix(raw_df)
-    results: Dict[str, pd.DataFrame] = {}
-    for (a, b) in pairs:
-        feat = compute_pair_features_from_prices(px, a, b, beta_window, z_window, min_periods)
-        key = f"{a}__{b}"
-        if not feat.empty:
-            results[key] = feat
-    return results
+        raise ValueError("In-memory mode requires raw_df and pairs.")
+    piv = _pivot_close(raw_df)
+    result: Dict[str, pd.DataFrame] = {}
+    for (a, b) in tqdm(list(pairs), desc="Features(mem)"):
+        df = _build_features_for_pair(piv, a, b, beta_window, z_window)
+        if df is None or df.empty:
+            continue
+        pair_key = f"{a}__{b}"
+        result[pair_key] = df
+    return result

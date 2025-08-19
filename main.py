@@ -2,17 +2,6 @@
 # -*- coding: utf-8 -*-
 
 from __future__ import annotations
-"""
-Main CLI for the mntrading pipeline:
-  screen_pairs.py → (this) ingest → features → dataset → train → backtest → select → promote
-
-Design goals:
-- No dependency on any non-existent modules.
-- Prefer your custom data loader in data_loader/loader.py when present.
-- Save artifacts under data/* exactly as the project expects.
-- Produce manifests with explicit file paths (downstream never guesses paths).
-"""
-
 import argparse
 import glob
 import json
@@ -37,55 +26,46 @@ for d in (RAW_DIR, FEATURES_DIR, DATASETS_DIR, MODELS_DIR, MODELS_PAIRS_DIR, BAC
 
 # --------------------- Optional imports ----------------------
 HAS_LOADER = False
-_loader = None
 try:
-    # Your custom loader (recommended)
-    from data_loader import loader as _loader  # noqa: E402
+    from data_loader import loader as _loader
     HAS_LOADER = True
 except Exception:
-    HAS_LOADER = False
     _loader = None
+    HAS_LOADER = False
 
-HAS_SPREAD = False
-_spread = None
 try:
-    from features import spread as _spread  # noqa: E402
+    from features import spread as _spread
     HAS_SPREAD = True
 except Exception:
-    HAS_SPREAD = False
     _spread = None
+    HAS_SPREAD = False
 
-HAS_LABELS = False
-_labels = None
 try:
-    from features.labels import DatasetBuildConfig, build_datasets_for_manifest  # noqa: E402
+    from features.labels import DatasetBuildConfig, build_datasets_for_manifest
     HAS_LABELS = True
 except Exception:
+    DatasetBuildConfig = None
+    build_datasets_for_manifest = None
     HAS_LABELS = False
-    _labels = None
 
-HAS_TRAIN = False
-_train = None
 try:
-    from models.train import train_baseline  # noqa: E402
+    from models.train import train_baseline
     HAS_TRAIN = True
 except Exception:
+    train_baseline = None
     HAS_TRAIN = False
-    _train = None
 
-HAS_BT = False
-_bt = None
 try:
-    from backtest.runner import run_backtest  # noqa: E402
+    from backtest.runner import run_backtest
     HAS_BT = True
 except Exception:
+    run_backtest = None
     HAS_BT = False
-    _bt = None
 
 
 # ------------------------- Helpers ---------------------------
 def _save_parquet(df: pd.DataFrame, path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True>
+    path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(path, index=False)
 
 
@@ -110,19 +90,13 @@ def _load_pairs_from_json(path: str) -> List[Tuple[str, str]]:
 
 
 def _parse_symbols_arg(arg: str) -> Tuple[List[str], List[Tuple[str, str]], Optional[str]]:
-    """
-    Returns (unique symbols list, pairs list, pairs_json_path if any).
-    --symbols accepts:
-      • CSV: "BTC/USDT,ETH/USDT"
-      • path/glob to screened_pairs_*.json
-    """
+
     pairs: List[Tuple[str, str]] = []
     symbols: List[str] = []
     pairs_json_path: Optional[str] = None
 
     paths = sorted(glob.glob(arg))
     if paths:
-        # Use the latest JSON (typical: data/pairs/screened_pairs_*.json)
         pairs_json_path = paths[-1]
         for p in paths:
             pairs.extend(_load_pairs_from_json(p))
@@ -139,12 +113,8 @@ def _parse_symbols_arg(arg: str) -> Tuple[List[str], List[Tuple[str, str]], Opti
     return symbols, pairs, pairs_json_path
 
 
-def _fallback_ccxt_ingest(symbols: List[str], timeframe: str, since_utc: Optional[str], limit: int):
-    """
-    Simple CCXT ingest when no custom loader is available.
-    Saves to data/raw/ohlcv.parquet with columns [ts, open, high, low, close, volume, symbol]
-    """
-    import ccxt  # imported on demand
+def _fallback_ccxt_ingest(symbols: List[str], timeframe: str, since_utc: Optional[str], limit: int) -> pd.DataFrame:
+    import ccxt
     ex = ccxt.binance()
     ex.load_markets()
 
@@ -157,7 +127,7 @@ def _fallback_ccxt_ingest(symbols: List[str], timeframe: str, since_utc: Optiona
         return df
 
     frames = []
-    for s in tqdm(symbols, desc="Ingest(ccxt)"):
+    for s in tqdm(symbols, desc=f"Ingest(ccxt:{timeframe})"):
         if s not in ex.markets:
             print(f"[warn] skip {s}: not in exchange markets")
             continue
@@ -165,80 +135,63 @@ def _fallback_ccxt_ingest(symbols: List[str], timeframe: str, since_utc: Optiona
     if not frames:
         raise SystemExit("Nothing ingested (ccxt fallback)")
     ohlcv = pd.concat(frames, ignore_index=True).sort_values(["symbol", "ts"])
-    _save_parquet(ohlcv, RAW_DIR / "ohlcv.parquet")
-    meta = {
-        "timeframe": timeframe,
-        "since_utc": since_utc,
-        "symbols": sorted(ohlcv["symbol"].unique().tolist()),
-        "rows": int(len(ohlcv)),
-    }
-    (RAW_DIR / "ohlcv_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[ingest] saved {len(ohlcv)} rows → {RAW_DIR/'ohlcv.parquet'}")
+    return ohlcv
 
 
 # ------------------------- Steps -----------------------------
 def step_ingest(symbols_arg: str, timeframe: str, since_utc: Optional[str], limit: int):
+
     symbols, _, _ = _parse_symbols_arg(symbols_arg)
     if not symbols:
         raise SystemExit("No symbols provided/resolved for ingest")
 
-    # Prefer your custom loader if available
-    if HAS_LOADER:
-        # Supported signatures in loader.py (any is OK):
-        #  a) get_ohlcv(symbols=[...], timeframe="5m", since_utc="...", limit=1000) -> DataFrame
-        #  b) ingest(symbols=[...], timeframe="5m", since_utc="...", limit=1000) -> DataFrame | None (may save itself)
-        #  c) fetch_ohlcv(symbol, timeframe, since_utc, limit) -> DataFrame (per-symbol)
-        if hasattr(_loader, "get_ohlcv"):
-            ohlcv = _loader.get_ohlcv(symbols=symbols, timeframe=timeframe, since_utc=since_utc, limit=limit)
-            if not isinstance(ohlcv, pd.DataFrame) or ohlcv.empty:
-                raise SystemExit("loader.get_ohlcv returned empty result")
-            _save_parquet(ohlcv, RAW_DIR / "ohlcv.parquet")
-        elif hasattr(_loader, "ingest"):
-            ohlcv = _loader.ingest(symbols=symbols, timeframe=timeframe, since_utc=since_utc, limit=limit)
-            if isinstance(ohlcv, pd.DataFrame) and not ohlcv.empty:
-                _save_parquet(ohlcv, RAW_DIR / "ohlcv.parquet")
-            elif not (RAW_DIR / "ohlcv.parquet").exists():
-                raise SystemExit("loader.ingest did not produce data/raw/ohlcv.parquet")
-        elif hasattr(_loader, "fetch_ohlcv"):
-            frames = []
-            for s in tqdm(symbols, desc="Ingest(loader.fetch_ohlcv)"):
-                df = _loader.fetch_ohlcv(s, timeframe=timeframe, since_utc=since_utc, limit=limit)
-                if isinstance(df, pd.DataFrame) and not df.empty:
-                    if "symbol" not in df.columns:
-                        df = df.assign(symbol=s)
-                    frames.append(df)
-            if not frames:
-                raise SystemExit("loader.fetch_ohlcv returned no data")
-            ohlcv = pd.concat(frames, ignore_index=True).sort_values(["symbol", "ts"])
-            _save_parquet(ohlcv, RAW_DIR / "ohlcv.parquet")
-        else:
-            print("[ingest] No compatible functions in data_loader/loader.py -> using CCXT fallback")
-            _fallback_ccxt_ingest(symbols, timeframe, since_utc, limit)
+    # Loader priority
+    if HAS_LOADER and hasattr(_loader, "get_ohlcv"):
+        ohlcv = _loader.get_ohlcv(symbols=symbols, timeframe=timeframe, since_utc=since_utc, limit=limit)
+    elif HAS_LOADER and hasattr(_loader, "ingest"):
+        ohlcv = _loader.ingest(symbols=symbols, timeframe=timeframe, since_utc=since_utc, limit=limit)
+        if ohlcv is None:
+            # если кастомный загрузчик сам сохраняет — попробуем прочитать дефолтный путь
+            p = RAW_DIR / f"ohlcv_{timeframe}.parquet"
+            if p.exists():
+                ohlcv = pd.read_parquet(p)
+    elif HAS_LOADER and hasattr(_loader, "fetch_ohlcv"):
+        frames = []
+        for s in tqdm(symbols, desc=f"Ingest(loader:{timeframe})"):
+            df = _loader.fetch_ohlcv(s, timeframe=timeframe, since_utc=since_utc, limit=limit)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                if "symbol" not in df.columns:
+                    df = df.assign(symbol=s)
+                frames.append(df)
+        if not frames:
+            raise SystemExit("loader.fetch_ohlcv returned no data")
+        ohlcv = pd.concat(frames, ignore_index=True).sort_values(["symbol", "ts"])
     else:
-        _fallback_ccxt_ingest(symbols, timeframe, since_utc, limit)
+        ohlcv = _fallback_ccxt_ingest(symbols, timeframe, since_utc, limit)
 
-    # write meta (if not already)
-    if (RAW_DIR / "ohlcv.parquet").exists():
-        ohlcv = pd.read_parquet(RAW_DIR / "ohlcv.parquet")
-        meta = {
-            "timeframe": timeframe,
-            "since_utc": since_utc,
-            "symbols": sorted(ohlcv["symbol"].unique().tolist()) if "symbol" in ohlcv.columns else [],
-            "rows": int(len(ohlcv)),
-        }
-        (RAW_DIR / "ohlcv_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"[ingest] meta -> {RAW_DIR/'ohlcv_meta.json'}")
+    if not isinstance(ohlcv, pd.DataFrame) or ohlcv.empty:
+        raise SystemExit("Ingest produced empty dataframe")
+
+
+    tf_file = RAW_DIR / f"ohlcv_{timeframe}.parquet"
+    _save_parquet(ohlcv, tf_file)
+    _save_parquet(ohlcv, RAW_DIR / "ohlcv.parquet")
+
+
+    meta = {
+        "timeframe": timeframe,
+        "since_utc": since_utc,
+        "symbols": sorted(ohlcv["symbol"].unique().tolist()) if "symbol" in ohlcv.columns else [],
+        "rows": int(len(ohlcv)),
+    }
+    (RAW_DIR / f"ohlcv_{timeframe}_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    (RAW_DIR / "ohlcv_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[ingest] saved {len(ohlcv)} rows → {tf_file}")
+    print(f"[ingest] meta -> {RAW_DIR/'ohlcv_meta.json'}")
 
 
 def step_features(symbols_arg: str, beta_window: int, z_window: int):
-    """
-    Build pair features.
-    Accepts --symbols as CSV or as path/glob to screened_pairs_*.json.
-    Writes individual pair folders:
-      data/features/pairs/<A__B>/features.parquet
-    and manifest:
-      data/features/pairs/_manifest.json with explicit paths.
-    """
+
     raw_path = RAW_DIR / "ohlcv.parquet"
     if not raw_path.exists():
         raise SystemExit(f"{raw_path} not found. Run ingest first.")
@@ -248,7 +201,6 @@ def step_features(symbols_arg: str, beta_window: int, z_window: int):
     produced_pairs: List[str] = []
 
     if HAS_SPREAD and hasattr(_spread, "compute_features_for_pairs"):
-        # Prefer file-based mode when a pairs JSON path is available
         if pairs_json_path:
             out = _spread.compute_features_for_pairs(
                 pairs_json=pairs_json_path,
@@ -260,7 +212,6 @@ def step_features(symbols_arg: str, beta_window: int, z_window: int):
             if isinstance(out, list):
                 produced_pairs = out
         else:
-            # CSV symbols → generate all combinations and save
             if not pairs:
                 syms = symbols
                 pairs = [(syms[i], syms[j]) for i in range(len(syms)) for j in range(i + 1, len(syms))]
@@ -268,18 +219,14 @@ def step_features(symbols_arg: str, beta_window: int, z_window: int):
                 raw_df=ohlcv, pairs=pairs, beta_window=beta_window, z_window=z_window
             )
             for pk, df in res.items():
-                safe = pk.replace("/", "_")
-                pair_dir = FEATURES_DIR / safe
+                pair_dir = (FEATURES_DIR / pk.replace("/", "_"))
                 pair_dir.mkdir(parents=True, exist_ok=True)
                 df.to_parquet(pair_dir / "features.parquet", index=False)
                 produced_pairs.append(pk)
     else:
-        # Minimal internal fallback
+
         print("[features] WARNING: features.spread not available; using minimal internal implementation.")
         piv = ohlcv.pivot(index="ts", columns="symbol", values="close").sort_index()
-        if not pairs:
-            syms = symbols
-            pairs = [(syms[i], syms[j]) for i in range(len(syms)) for j in range(i + 1, len(syms))]
 
         def _rolling_beta_alpha(y: pd.Series, x: pd.Series, win: int):
             x_mean = x.rolling(win).mean()
@@ -294,6 +241,10 @@ def step_features(symbols_arg: str, beta_window: int, z_window: int):
             mu = s.rolling(win).mean()
             sd = s.rolling(win).std()
             return (s - mu) / (sd + 1e-12)
+
+        if not pairs:
+            syms = symbols
+            pairs = [(syms[i], syms[j]) for i in range(len(syms)) for j in range(i + 1, len(syms))]
 
         for (a, b) in tqdm(pairs, desc="Features(fallback)"):
             if a not in piv.columns or b not in piv.columns:
@@ -314,19 +265,17 @@ def step_features(symbols_arg: str, beta_window: int, z_window: int):
                 "z": z.values,
             }).dropna().reset_index(drop=True)
             pk = f"{a}__{b}"
-            safe = pk.replace("/", "_")
-            pair_dir = FEATURES_DIR / safe
+            pair_dir = (FEATURES_DIR / pk.replace("/", "_"))
             pair_dir.mkdir(parents=True, exist_ok=True)
             out.to_parquet(pair_dir / "features.parquet", index=False)
             produced_pairs.append(pk)
 
-    # Build manifest with explicit parquet paths
+    # manifest
     items: List[Dict[str, Any]] = []
     for pk in sorted(set(produced_pairs)):
-        safe = pk.replace("/", "_")
-        path = (FEATURES_DIR / safe / "features.parquet").resolve()
-        if path.exists():
-            items.append({"pair": pk, "path": str(path), "features": ["a", "b", "beta", "alpha", "spread", "z"]})
+        p = (FEATURES_DIR / pk.replace("/", "_") / "features.parquet").resolve()
+        if p.exists():
+            items.append({"pair": pk, "path": str(p), "features": ["a", "b", "beta", "alpha", "spread", "z"]})
     manifest = {"items": items, "features_dir": str(FEATURES_DIR.resolve())}
     (FEATURES_DIR / "_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[features] built {len(items)} pairs -> {FEATURES_DIR}")
@@ -341,13 +290,8 @@ def step_dataset(
     horizon: int,
     out_dir: Optional[str] = None,
 ):
-    """
-    Build supervised datasets per pair from features manifest.
-    Writes data/datasets/pairs/<A__B>__ds.parquet and data/datasets/_manifest.json
-    """
     if not HAS_LABELS:
-        raise SystemExit("features.labels not available. Please add features/labels.py with build_datasets_for_manifest().")
-
+        raise SystemExit("features.labels not available. Add features/labels.py with build_datasets_for_manifest().")
     out_dir_path = Path(out_dir) if out_dir else DATASETS_DIR
     out_dir_path.mkdir(parents=True, exist_ok=True)
 
@@ -368,11 +312,8 @@ def step_dataset(
 
 def step_train(use_dataset: bool, n_splits: int, gap: int, max_train_size: int,
                early_stopping_rounds: int, proba_threshold: float):
-    """
-    Train per-pair models with time-series CV, save OOF predictions and a train report.
-    """
     if not HAS_TRAIN:
-        raise SystemExit("models.train not available. Please add models/train.py with train_baseline().")
+        raise SystemExit("models.train not available. Add models/train.py with train_baseline().")
     report = train_baseline(
         datasets_dir=str(DATASETS_DIR),
         features_dir=str(FEATURES_DIR),
@@ -389,11 +330,8 @@ def step_train(use_dataset: bool, n_splits: int, gap: int, max_train_size: int,
 
 
 def step_backtest(use_dataset: bool, signals_from: str, proba_threshold: float, fee_rate: float):
-    """
-    Backtest using features + optional OOF probabilities. Writes a summary JSON.
-    """
     if not HAS_BT:
-        raise SystemExit("backtest.runner not available. Please add backtest/runner.py with run_backtest().")
+        raise SystemExit("backtest.runner not available. Add backtest/runner.py with run_backtest().")
     summary = run_backtest(
         features_dir=str(FEATURES_DIR),
         datasets_dir=str(DATASETS_DIR),
@@ -403,18 +341,13 @@ def step_backtest(use_dataset: bool, signals_from: str, proba_threshold: float, 
         fee_rate=fee_rate,
     )
     (BACKTEST_DIR / "_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    # quiet: runner already prints the summary path
 
 
 def step_select(summary_path: str, registry_out: str, sharpe_min: float, maxdd_max: float, top_k: int,
                 require_oof: bool = False, min_auc: Optional[float] = None,
                 min_rows: Optional[int] = None, max_per_symbol: Optional[int] = None):
-    """
-    Champion selection using models/select.py if available; otherwise a simple fallback.
-    """
-    # Try the richer selector
     try:
-        from models.select import select_champions as _select  # local import to avoid hard dep
+        from models.select import select_champions as _select
         _select(
             summary_path=summary_path,
             registry_out=registry_out,
@@ -431,7 +364,6 @@ def step_select(summary_path: str, registry_out: str, sharpe_min: float, maxdd_m
         return
     except Exception as e:
         print(f"[select] models.select not available or failed: {e}")
-        # Fallback: simple filter & sort by Sharpe
         p = Path(summary_path)
         if not p.exists():
             raise SystemExit(f"Summary not found: {p}")
@@ -455,10 +387,6 @@ def step_select(summary_path: str, registry_out: str, sharpe_min: float, maxdd_m
 
 
 def step_promote(registry_in: str, production_map_out: str):
-    """
-    Promote currently selected champions into a simple production map:
-      {"pairs":["AAA/USDT__BBB/USDT", ...]}
-    """
     p = Path(registry_in)
     if not p.exists():
         raise SystemExit(f"Registry not found: {p}")
@@ -478,7 +406,7 @@ def build_argparser() -> argparse.ArgumentParser:
 
     # Common / ingest
     ap.add_argument("--symbols", type=str,
-                    help="CSV of symbols OR path/glob to screened_pairs_*.json (for features/ingest)")
+                    help="CSV of symbols OR path/glob to screened_pairs_*.json")
     ap.add_argument("--timeframe", type=str, default="5m")
     ap.add_argument("--since-utc", type=str, default=None)
     ap.add_argument("--limit", type=int, default=1000)
@@ -493,9 +421,8 @@ def build_argparser() -> argparse.ArgumentParser:
                     choices=["z_threshold", "revert_direction"])
     ap.add_argument("--zscore-threshold", type=float, default=1.5)
     ap.add_argument("--lag-features", type=int, default=1)
-    ap.add_argument("--horizon", type=int, default=0)  # fixed: was type[int]
-    ap.add_argument("--out-dir", type=str, default=None,
-                    help="Optional override for datasets output directory (default: data/datasets/pairs)")
+    ap.add_argument("--horizon", type=int, default=0)
+    ap.add_argument("--out-dir", type=str, default=None)
 
     # train
     ap.add_argument("--use-dataset", action="store_true")
@@ -519,14 +446,10 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--registry-in", type=str, default=str(MODELS_DIR / "registry.json"))
 
     # selection advanced filters (optional)
-    ap.add_argument("--require-oof", action="store_true",
-                    help="Only keep pairs whose backtest used OOF probabilities")
-    ap.add_argument("--min-auc", type=float, default=None,
-                    help="Filter out pairs whose train AUC is below this value (requires _train_report.json)")
-    ap.add_argument("--min-rows", type=int, default=None,
-                    help="Filter out pairs with too few dataset rows (requires _train_report.json)")
-    ap.add_argument("--max-per-symbol", type=int, default=None,
-                    help="Limit how many pairs per base symbol (diversity constraint)")
+    ap.add_argument("--require-oof", action="store_true")
+    ap.add_argument("--min-auc", type=float, default=None)
+    ap.add_argument("--min-rows", type=int, default=None)
+    ap.add_argument("--max-per-symbol", type=int, default=None)
     return ap
 
 
