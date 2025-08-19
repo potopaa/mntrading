@@ -1,197 +1,149 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-Screen asset pairs for pairs trading.
+screen_pairs.py — screening cointegration/correlation pairs.
 
-Reads raw OHLCV parquet (long format: ts/symbol/close) and outputs screened pairs JSON:
-{
-  "pairs": [
-    {"a": "BTC/USDT", "b": "ETH/USDT", "metrics": {"corr": 0.82, "pvalue": 0.01, "bars": 25000}},
-    ...
-  ],
-  ...
-}
-
-Use with the pipeline:
-  1) python screen_pairs.py --raw-parquet data/raw/ohlcv.parquet --top-k 200
-  2) python main.py --mode features --symbols data/pairs/screened_pairs_*.json
+Usage examples:
+  python screen_pairs.py --raw-parquet data/raw/ohlcv.parquet --symbols ALL --quote USDT --min-bars 150 --min-corr 0.10 --max-pvalue 1.0 --top-k 200
+  python screen_pairs.py --raw-parquet data/raw/ohlcv.parquet --symbols "BTC/USDT,ETH/USDT,SOL/USDT"
 """
 
 from __future__ import annotations
-
+import argparse
 import json
-import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Sequence, Optional, Tuple
 
-import click
 import numpy as np
 import pandas as pd
 
-# Optional cointegration test
 try:
-    from statsmodels.tsa.stattools import coint  # type: ignore
-    HAS_SM = True
+    import statsmodels.tsa.stattools as smt
+    HAS_STATSMODELS = True
 except Exception:
-    HAS_SM = False
+    HAS_STATSMODELS = False
 
 
-# ------------------------- Helpers -------------------------
-def _utf8_stdio():
+def _load_all_symbols_from_parquet(parquet_path: Path, quote: Optional[str], max_symbols: Optional[int]) -> List[str]:
+    df = pd.read_parquet(parquet_path)
+    if "symbol" not in df.columns:
+        raise ValueError(f"'symbol' column not found in {parquet_path}")
+    syms = sorted(df["symbol"].dropna().astype(str).unique().tolist())
+    if quote:
+        syms = [s for s in syms if s.upper().endswith(f"/{quote.upper()}")]
+    if max_symbols and max_symbols > 0:
+        syms = syms[:max_symbols]
+    if not syms:
+        raise ValueError("No symbols discovered from parquet with given filters")
+    return syms
+
+
+def _parse_symbols_arg(symbols_arg: Optional[str]) -> Optional[List[str]]:
+    if not symbols_arg:
+        return None
+    s = symbols_arg.strip()
+    if s.upper() in {"ALL", "__ALL__"}:
+        return None
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+
+def _engle_granger_pvalue(y: pd.Series, x: pd.Series) -> float:
+    # Simple Engle–Granger cointegration test p-value
+    # (y and x should be aligned, same index)
+    if not HAS_STATSMODELS:
+        return 1.0  # effectively "pass everything"
     try:
-        sys.stdout.reconfigure(encoding="utf-8")
-        sys.stderr.reconfigure(encoding="utf-8")
+        res = smt.coint(y, x)
+        return float(res[1])
     except Exception:
-        pass
-
-
-def build_close_matrix(raw: pd.DataFrame) -> pd.DataFrame:
-    """
-    Convert raw OHLCV to a wide close-price matrix with DatetimeIndex (UTC).
-    Supports long format with columns ['symbol','close'] and a time column among:
-    ['ts','timestamp','time','date','datetime'].
-    """
-    lower = {str(c).lower(): c for c in raw.columns}
-    if "symbol" in lower and "close" in lower:
-        time_col = None
-        for cand in ("ts", "timestamp", "time", "date", "datetime"):
-            if cand in lower:
-                time_col = lower[cand]
-                break
-        if time_col is None:
-            raise ValueError("Time column not found in raw parquet (expected ts/timestamp/time/date/datetime)")
-        idx = pd.to_datetime(raw[time_col], utc=True, errors="coerce")
-        wide = raw.assign(_ts=idx).pivot(index="_ts", columns=lower["symbol"], values=lower["close"])
-        wide.index.name = "ts"
-        return wide.sort_index()
-
-    # assume wide already
-    df = raw.copy()
-    if not isinstance(df.index, pd.DatetimeIndex):
-        df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
-    df.index.name = "ts"
-    return df.sort_index()
+        return 1.0
 
 
 def screen_pairs(
-    px: pd.DataFrame,
-    symbols: Optional[List[str]],
-    min_bars: int,
-    min_corr: float,
-    max_pvalue: float,
-    top_k: int,
-) -> List[Dict[str, Any]]:
-    """
-    Simple screener:
-      - compute log-returns corr for overlapping window;
-      - if statsmodels available, compute Engle-Granger cointegration p-value on log-prices;
-      - filter by min_bars, min_corr, (pvalue <= max_pvalue);
-      - sort by (pvalue asc, corr desc, bars desc) if cointegration is available, else by corr, bars.
-    """
-    cols = symbols if symbols else [c for c in px.columns if pd.api.types.is_numeric_dtype(px[c])]
-    cols = [c for c in cols if c in px.columns]
-    if len(cols) < 2:
-        return []
+    parquet_path: Path,
+    symbols: Sequence[str],
+    min_bars: int = 150,
+    min_corr: float = 0.10,
+    max_pvalue: float = 1.0,
+    top_k: int = 200,
+    out_dir: Path = Path("data/pairs"),
+) -> Path:
+    df = pd.read_parquet(parquet_path)
+    tcol = next(c for c in ["ts", "timestamp", "time", "date", "datetime"] if c in df.columns)
+    px = df[df["symbol"].isin(symbols)].pivot(index=tcol, columns="symbol", values="close")
+    px.index = pd.to_datetime(px.index, utc=True, errors="coerce")
+    rets = np.log(px).diff()
 
-    lpx = np.log(px[cols].astype("float64").clip(1e-12))
-    rets = lpx.diff().dropna()
+    corr = rets.corr().abs()
+    cols = corr.columns.tolist()
 
-    results: List[Tuple[str, str, float, float, int]] = []  # a,b,corr,pval,n
-    ncols = len(cols)
-    for i in range(ncols):
-        a = cols[i]
-        for j in range(i + 1, ncols):
-            b = cols[j]
-            rpair = rets[[a, b]].dropna()
-            n = len(rpair)
+    candidates: List[Tuple[str, str, float, int, float]] = []
+    for i, a in enumerate(cols):
+        for b in cols[i + 1 :]:
+            sub = rets[[a, b]].dropna()
+            n = int(sub.shape[0])
             if n < min_bars:
                 continue
-            corr = float(rpair[a].corr(rpair[b]))
-            if not np.isfinite(corr) or corr < min_corr:
+            c = float(corr.loc[a, b])
+            if not np.isfinite(c) or c < min_corr:
                 continue
+            # (optional) cointegration
+            pv = _engle_granger_pvalue(px[a].dropna(), px[b].dropna()) if HAS_STATSMODELS else 0.999
+            if pv <= max_pvalue:
+                candidates.append((a, b, c, n, pv))
 
-            pval = 1.0
-            if HAS_SM:
-                try:
-                    ab = lpx[[a, b]].dropna()
-                    if len(ab) >= min_bars:
-                        _, pval, _ = coint(ab[a].values, ab[b].values, trend="c", autolag="AIC")
-                        if not np.isfinite(pval):
-                            pval = 1.0
-                except Exception:
-                    pval = 1.0
+    candidates.sort(key=lambda x: (x[2], x[3]), reverse=True)
+    if top_k and top_k > 0:
+        candidates = candidates[:top_k]
 
-            results.append((a, b, corr, pval, n))
-
-    if not results:
-        return []
-
-    if HAS_SM:
-        results.sort(key=lambda t: (t[3], -t[2], -t[4]))
-        filtered = [r for r in results if r[3] <= max_pvalue]
-    else:
-        results.sort(key=lambda t: (-t[2], -t[4]))
-        filtered = results
-
-    if top_k > 0:
-        filtered = filtered[:top_k]
-
-    out = [
-        {"a": a, "b": b, "metrics": {"corr": round(c, 6), "pvalue": (round(p, 6) if HAS_SM else None), "bars": int(n)}}
-        for (a, b, c, p, n) in filtered
-    ]
-    return out
-
-
-# --------------------------- CLI ---------------------------
-@click.command()
-@click.option("--raw-parquet", default="data/raw/ohlcv.parquet", show_default=True,
-              type=click.Path(exists=True, dir_okay=False))
-@click.option("--symbols", default="", help="CSV list of symbols to consider. If empty, use all from raw.")
-@click.option("--min-bars", default=2000, show_default=True, type=int, help="Minimum overlapping bars per pair")
-@click.option("--min-corr", default=0.6, show_default=True, type=float, help="Min correlation of log-returns")
-@click.option("--max-pvalue", default=0.05, show_default=True, type=float,
-              help="Max cointegration p-value (ignored if statsmodels is not installed)")
-@click.option("--top-k", default=200, show_default=True, type=int, help="Keep top-K pairs after filters")
-@click.option("--out", "out_path", default="", help="Output JSON path. Default: data/pairs/screened_pairs_<UTC>.json")
-def main(raw_parquet: str, symbols: str, min_bars: int, min_corr: float, max_pvalue: float, top_k: int, out_path: str):
-    _utf8_stdio()
-
-    raw = pd.read_parquet(raw_parquet)
-    px = build_close_matrix(raw)
-    syms = [s.strip() for s in symbols.split(",") if s.strip()] if symbols else None
-
-    pairs = screen_pairs(
-        px=px,
-        symbols=syms,
-        min_bars=int(min_bars),
-        min_corr=float(min_corr),
-        max_pvalue=float(max_pvalue),
-        top_k=int(top_k),
-    )
-
-    out_dir = Path("data/pairs")
     out_dir.mkdir(parents=True, exist_ok=True)
-    if not out_path:
-        ts = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%SZ")
-        out_path = out_dir / f"screened_pairs_{ts}.json"
-    else:
-        out_path = Path(out_path)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+    ts = pd.Timestamp.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    out_path = out_dir / f"screened_pairs_{ts}.json"
 
-    payload = {
-        "pairs": pairs,
-        "raw_parquet": str(Path(raw_parquet).resolve()),
-        "min_bars": int(min_bars),
-        "min_corr": float(min_corr),
-        "max_pvalue": (float(max_pvalue) if HAS_SM else None),
-        "top_k": int(top_k),
-    }
-    Path(out_path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[screen] wrote {len(pairs)} pairs -> {out_path}")
-    if not HAS_SM:
-        print("[warn] statsmodels not installed; cointegration filter skipped (using correlation only)")
+    payload = [
+        {"a": a, "b": b, "corr": round(c, 6), "bars": n, "pvalue": round(pv, 6)}
+        for a, b, c, n, pv in candidates
+    ]
+    out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[screen] wrote {len(payload)} pairs -> {out_path}")
+    if not HAS_STATSMODELS:
+        print("[warn] statsmodels not installed — skipping cointegration test (using pvalue ~ 1.0 pass-through).")
+    return out_path
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--raw-parquet", type=Path, default=Path("data/raw/ohlcv.parquet"))
+    ap.add_argument("--symbols", type=str, default="ALL",
+                    help='Comma-separated list or "ALL" to use every symbol found in parquet.')
+    ap.add_argument("--quote", type=str, default="USDT", help="Filter symbols by quote currency (e.g., USDT).")
+    ap.add_argument("--max-symbols", type=int, default=0, help="Optional cap for discovered symbols (0 = no cap).")
+    ap.add_argument("--min-bars", type=int, default=150)
+    ap.add_argument("--min-corr", type=float, default=0.10)
+    ap.add_argument("--max-pvalue", type=float, default=1.0)
+    ap.add_argument("--top-k", type=int, default=200)
+    ap.add_argument("--universe-json", type=Path, default=None,
+                    help="Optional JSON file with explicit universe ['BTC/USDT', ...]. Overrides --symbols/--quote discovery.")
+    args = ap.parse_args()
+
+    if args.universe_json and args.universe_json.exists():
+        syms = json.loads(args.universe_json.read_text(encoding="utf-8"))
+        if not isinstance(syms, list) or not syms:
+            raise ValueError("--universe-json should be a JSON array of symbols")
+    else:
+        parsed = _parse_symbols_arg(args.symbols)
+        if parsed is None:
+            syms = _load_all_symbols_from_parquet(args.raw_parquet, args.quote, args.max_symbols)
+        else:
+            syms = parsed
+
+    screen_pairs(
+        parquet_path=args.raw_parquet,
+        symbols=syms,
+        min_bars=args.min_bars,
+        min_corr=args.min_corr,
+        max_pvalue=args.max_pvalue,
+        top_k=args.top_k,
+    )
 
 
 if __name__ == "__main__":

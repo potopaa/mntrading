@@ -37,109 +37,71 @@ except Exception:
 
 # ---------- utils ----------
 
-def _safe_auc(y_true, y_prob) -> float:
-    u = np.unique(y_true)
-    if len(u) < 2:
-        return float("nan")
+def _utf8_stdio():
+    import sys, io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
+
+def _safe_auc(y_true, y_proba) -> float:
     try:
-        return float(roc_auc_score(y_true, y_prob))
+        return float(roc_auc_score(y_true, y_proba))
     except Exception:
         return float("nan")
 
 
-def _safe_logloss(y_true, y_prob) -> float:
+def _safe_acc(y_true, y_pred) -> float:
     try:
-        return float(log_loss(y_true, y_prob, eps=1e-15))
+        return float(accuracy_score(y_true, y_pred))
     except Exception:
         return float("nan")
 
 
-def _choose_champion(metrics: Dict[str, Dict[str, float]]) -> Tuple[str, Dict[str, float]]:
-    ranked = sorted(
-        metrics.items(),
-        key=lambda kv: (float(kv[1].get("auc") or 0.0), float(kv[1].get("accuracy") or 0.0)),
-        reverse=True,
-    )
-    if not ranked:
-        return "logreg", {"auc": float("nan"), "logloss": float("nan"), "accuracy": float("nan")}
-    return ranked[0][0], ranked[0][1]
+def _safe_logloss(y_true, y_proba) -> float:
+    try:
+        return float(log_loss(y_true, y_proba, eps=1e-7))
+    except Exception:
+        return float("nan")
 
 
-def _detect_xy(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
-    df = df.copy()
-    # целевая колонка — любая из типичных
-    y_col = next((c for c in ["y", "label", "target", "signal"] if c in df.columns), None)
-    if y_col is None:
-        raise ValueError("No target column found. Expected one of: y, label, target, signal")
+def _read_pair_features(path: Path) -> Optional[pd.DataFrame]:
+    if not path.exists():
+        return None
+    try:
+        return pd.read_parquet(path)
+    except Exception:
+        return None
 
-    y = df[y_col].astype(int).copy()
-    X = df.drop(columns=[y_col]).copy()
 
-    # выкинем нечисловые, кроме timestamp/ts (пусть пройдёт вниз по конвейеру)
-    for c in list(X.columns):
-        if np.issubdtype(X[c].dtype, np.number):
+def _resolve_pair_file(source: str, pair: str) -> Optional[Path]:
+    # source == "dataset" or "features"
+    if source == "dataset":
+        p = Path("data/datasets/pairs") / f"{pair}.parquet"
+        return p
+    else:
+        p = Path("data/features/pairs") / f"{pair}.parquet"
+        return p if p.exists() else None
+
+
+def _iter_time_splits(n: int, n_splits: int, gap: int, max_train_size: int):
+    """
+    Custom CV for time series with optional max_train_size and gap before test.
+    Yields (train_idx, test_idx).
+    """
+    if n_splits <= 1:
+        yield np.arange(0, n - gap), np.arange(n - gap, n)
+        return
+    # crude splitter similar to TimeSeriesSplit but with gap & max_train_size
+    fold_size = (n - gap) // n_splits
+    for i in range(n_splits):
+        tr_end = (i + 1) * fold_size
+        te_start = tr_end + gap
+        te_end = min(te_start + fold_size, n)
+        if te_start >= te_end or tr_end <= 0:
             continue
-        if c not in ("timestamp", "ts"):
-            X.drop(columns=[c], inplace=True)
-
-    X = X.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    return X, y
-
-
-def _list_pairs_from_manifest(base: Path) -> List[str]:
-    # пробуем <base>/pairs/_manifest.json, затем <base>/_manifest.json
-    for cand in [base / "pairs" / "_manifest.json", base / "_manifest.json"]:
-        if cand.exists():
-            try:
-                data = json.loads(cand.read_text(encoding="utf-8"))
-                pairs = data.get("pairs") or data.get("symbols") or []
-                if isinstance(pairs, list):
-                    # элементы могут быть строками "A/B|C/D"
-                    norm: List[str] = []
-                    for x in pairs:
-                        if isinstance(x, str):
-                            norm.append(x)
-                        elif isinstance(x, dict) and "pair" in x:
-                            norm.append(x["pair"])
-                    return sorted(set(norm or pairs))
-            except Exception:
-                pass
-
-    # fallback: просканировать parquet-файлы
-    pairs = set()
-    for root in [base / "pairs", base]:
-        if root.exists():
-            for f in root.rglob("*.parquet"):
-                pairs.add(f.stem)
-    return sorted(pairs)
-
-
-def _resolve_pair_file(base: Path, pair: str) -> Optional[Path]:
-    # ищем в <base>/pairs/<PAIR>.parquet, затем в <base>/<PAIR>.parquet
-    cand = base / "pairs" / f"{pair}.parquet"
-    if cand.exists():
-        return cand
-    cand2 = base / f"{pair}.parquet"
-    if cand2.exists():
-        return cand2
-    # ещё вариант: папка <base>/pairs/<PAIR>/*.parquet
-    folder = base / "pairs" / pair
-    if folder.exists():
-        ps = list(folder.glob("*.parquet"))
-        if ps:
-            return ps[0]
-    return None
-
-
-def _time_series_folds(n: int, n_splits=3, gap=5, max_train_size=2000):
-    tscv = TimeSeriesSplit(n_splits=n_splits, gap=0)
-    idx = np.arange(n)
-    for tr, te in tscv.split(idx):
-        if gap > 0:
-            mx = te.min()
-            tr = tr[tr <= (mx - gap)]
-        if max_train_size and len(tr) > max_train_size:
-            tr = tr[-max_train_size:]
+        tr_start = max(0, tr_end - max_train_size) if max_train_size > 0 else 0
+        tr = np.arange(tr_start, tr_end)
+        te = np.arange(te_start, te_end)
         if len(tr) == 0 or len(te) == 0:
             continue
         yield tr, te
@@ -175,6 +137,7 @@ def _mlflow_log_model_sklearn(model, name: str, input_example=None):
     try:
         mlflow.sklearn.log_model(sk_model=model, name=name, input_example=input_example)
     except TypeError:
+        # MLflow < 2.14
         mlflow.sklearn.log_model(sk_model=model, artifact_path=name, input_example=input_example)
 
 
@@ -183,105 +146,119 @@ def _mlflow_log_model_lightgbm(model, name: str):
     try:
         mlflow.lightgbm.log_model(lgb_model=model, name=name)
     except TypeError:
+        # MLflow < 2.14
         mlflow.lightgbm.log_model(lgb_model=model, artifact_path=name)
 
 
 # ---------- core training ----------
 
 def _fit_eval_all(X: pd.DataFrame, y: pd.Series, n_splits: int, gap: int,
-                  max_train_size: int, early_stopping_rounds: int, seed: int = 42):
-    # Baseline
-    lr = Pipeline([
-        ("scaler", StandardScaler(with_mean=False)),
-        ("lr", LogisticRegression(max_iter=2000, class_weight="balanced", random_state=seed)),
+                  max_train_size: int, early_stopping_rounds: int):
+    """
+    Train 2–3 simple models + LightGBM (if available) and compute OOF metrics.
+    Returns dict: {'baseline': {...}, 'rf': {...}, 'lgbm': {...?}} with metrics + predictions.
+    """
+    results = {}
+
+    # Baseline: logistic regression on standardized features
+    pipe_lr = Pipeline([
+        ("scaler", StandardScaler(with_mean=True, with_std=True)),
+        ("lr", LogisticRegression(max_iter=200, solver="lbfgs"))
     ])
 
+    # Random Forest
     rf = RandomForestClassifier(
-        n_estimators=500, max_depth=None,
-        min_samples_leaf=2, class_weight="balanced_subsample",
-        n_jobs=-1, random_state=seed,
+        n_estimators=200,
+        max_depth=None,
+        min_samples_leaf=5,
+        n_jobs=-1,
+        random_state=42,
     )
 
-    lgbm = None
+    # Optional LGBM
     if HAS_LGB:
         lgbm = lgb.LGBMClassifier(
-            objective="binary",
-            metric="binary_logloss",
-            boosting_type="gbdt",
+            n_estimators=400,
             learning_rate=0.05,
-            n_estimators=500,
             num_leaves=31,
             max_depth=-1,
-            min_data_in_leaf=5,
-            min_sum_hessian_in_leaf=1e-3,
-            subsample=0.8,
+            subsample=0.9,
             colsample_bytree=0.8,
-            reg_alpha=0.0,
-            reg_lambda=0.0,
+            random_state=42,
             n_jobs=-1,
-            random_state=seed,
         )
+    else:
+        lgbm = None
 
-    models = {"logreg": lr, "rf": rf}
-    if lgbm is not None:
-        models["lgbm"] = lgbm
+    # OOF storage
+    oof = {
+        "baseline": np.full(len(y), np.nan, dtype=float),
+        "rf": np.full(len(y), np.nan, dtype=float),
+    }
+    if HAS_LGB:
+        oof["lgbm"] = np.full(len(y), np.nan, dtype=float)
 
-    oof = {k: np.full(len(X), np.nan) for k in models}
-    for tr, te in _time_series_folds(len(X), n_splits=n_splits, gap=gap, max_train_size=max_train_size):
-        Xtr, ytr = X.iloc[tr], y.iloc[tr]
-        Xte, yte = X.iloc[te], y.iloc[te]
-        if ytr.nunique() < 2:
-            continue
+    # CV
+    for tr_idx, te_idx in _iter_time_splits(len(y), n_splits, gap, max_train_size):
+        X_tr, y_tr = X.iloc[tr_idx], y.iloc[tr_idx]
+        X_te, y_te = X.iloc[te_idx], y.iloc[te_idx]
 
-        for name, est in models.items():
-            est_ = est
-            if HAS_LGB and name == "lgbm":
-                try:
-                    est_.fit(
-                        Xtr, ytr,
-                        eval_set=[(Xte, yte)],
-                        eval_metric="logloss",
-                        callbacks=[lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=False)],
-                    )
-                except Exception:
-                    est_.fit(Xtr, ytr)
-            else:
-                est_.fit(Xtr, ytr)
+        # Baseline
+        pipe_lr.fit(X_tr, y_tr)
+        oof["baseline"][te_idx] = pipe_lr.predict_proba(X_te)[:, 1]
 
-            try:
-                p = est_.predict_proba(Xte)[:, 1]
-            except Exception:
-                s = est_.decision_function(Xte)
-                p = 1.0 / (1.0 + np.exp(-s))
-            oof[name][te] = p
+        # RF
+        rf.fit(X_tr, y_tr)
+        oof["rf"][te_idx] = rf.predict_proba(X_te)[:, 1]
 
-    metrics_by_model: Dict[str, Dict[str, float]] = {}
-    for name, p in oof.items():
-        mask = ~np.isnan(p)
+        # LGB
+        if HAS_LGB:
+            # keep it robust on small/flat data
+            lgbm.fit(
+                X_tr, y_tr,
+                eval_set=[(X_te, y_te)],
+                eval_metric="auc",
+                callbacks=[
+                    lgb.early_stopping(stopping_rounds=max(10, early_stopping_rounds), verbose=False),
+                    lgb.log_evaluation(period=0),
+                ]
+            )
+            oof["lgbm"][te_idx] = lgbm.predict_proba(X_te)[:, 1]
+
+    # Metrics
+    out = {}
+    for name, pred in oof.items():
+        mask = ~np.isnan(pred)
         if mask.sum() == 0:
-            m = {"auc": float("nan"), "logloss": float("nan"), "accuracy": float("nan")}
-        else:
-            m = {
-                "auc": _safe_auc(y[mask].values, p[mask]),
-                "logloss": _safe_logloss(y[mask].values, p[mask]),
-                "accuracy": float(accuracy_score(y[mask].values, (p[mask] >= 0.5).astype(int))),
-            }
-        metrics_by_model[name] = m
+            out[name] = {"auc": float("nan"), "logloss": float("nan"), "acc": float("nan")}
+            continue
+        y_true = y.iloc[mask].values
+        y_proba = pred[mask]
+        y_pred = (y_proba >= 0.5).astype(int)
+        out[name] = {
+            "auc": _safe_auc(y_true, y_proba),
+            "logloss": _safe_logloss(y_true, y_proba),
+            "acc": _safe_acc(y_true, y_pred),
+        }
 
-    # финальная дообучка на всём
-    models_full: Dict[str, object] = {}
-    Xfull = X.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    for name, est in models.items():
-        try:
-            est.fit(Xfull, y)
-            models_full[name] = est
-        except Exception:
-            pass
-
-    return metrics_by_model, models_full, oof
+    return out, pipe_lr, rf, (lgbm if HAS_LGB else None), oof
 
 
-# ---------- public API for main.py ----------
+def _choose_champion(metrics_by_model: Dict[str, Dict[str, float]]) -> Tuple[str, Dict[str, float]]:
+    """
+    Choose best model by AUC; tie-break by accuracy.
+    """
+    best = None
+    best_name = ""
+    for name, m in metrics_by_model.items():
+        auc = m.get("auc", float("nan"))
+        acc = m.get("acc", float("nan"))
+        key = (0.0 if math.isnan(auc) else auc, 0.0 if math.isnan(acc) else acc)
+        if (best is None) or (key > best):
+            best = key
+            best_name = name
+    return best_name, metrics_by_model.get(best_name, {})
+
 
 def train_baseline(
     datasets_dir: str,
@@ -298,26 +275,32 @@ def train_baseline(
     Expected by main.py. Trains per-pair models and returns JSON-able report.
     Artifacts saved under <out_dir>/pairs/<PAIR>/.
     """
-    ds_base = Path(datasets_dir)
-    fe_base = Path(features_dir)
-    out_base = Path(out_dir)
-    out_pairs = out_base / "pairs"
-    out_pairs.mkdir(parents=True, exist_ok=True)
+    _utf8_stdio()
 
-    source = ds_base if use_dataset and ds_base.exists() else fe_base
-    pairs = _list_pairs_from_manifest(source)
+    # Source
+    source = "dataset" if use_dataset else "features"
+
+    # Determine pair list from manifest produced by previous steps
+    manifest_path = Path("data/features/pairs/_manifest.json")
+    if manifest_path.exists():
+        try:
+            pairs = json.loads(manifest_path.read_text(encoding="utf-8")).get("pairs", [])
+        except Exception:
+            pairs = []
+    else:
+        pairs = []
+
     if not pairs:
         return {"pairs_trained": 0, "pairs_total": 0, "items": [], "reason": "no_pairs_found"}
 
-    # MLflow: не обязателен, но попробуем (+ явный debug)
+    # MLflow: optional but preferred
     try:
         import mlflow
         exp_id = _ensure_mlflow_experiment()
         print(f"[mlflow] tracking_uri={mlflow.get_tracking_uri()} exp_id={exp_id}")
         mlflow_ok = True
-    except Exception as e:
+    except Exception:
         mlflow_ok = False
-        print(f"[mlflow] disabled: {e!r}")
 
     results = []
 
@@ -328,76 +311,65 @@ def train_baseline(
             results.append({"pair": pair, "skipped": True, "reason": "file_not_found"})
             continue
 
-        df = pd.read_parquet(fpath)
-        try:
-            X, y = _detect_xy(df)
-        except Exception as e:
-            results.append({"pair": pair, "skipped": True, "reason": f"bad_dataset: {e}"})
+        df = _read_pair_features(fpath)
+        if df is None or len(df) < 50:
+            results.append({"pair": pair, "skipped": True, "reason": "too_few_rows"})
             continue
 
-        # sanity-guard
-        if len(X) < max(100, n_splits * 50) or pd.Series(y).nunique() < 2:
-            results.append({"pair": pair, "skipped": True, "reason": "too_small_or_constant"})
+        # Expect columns: features... + 'y'
+        if "y" not in df.columns:
+            results.append({"pair": pair, "skipped": True, "reason": "no_y"})
             continue
 
-        # MLflow: если был отключен, пробуем реинициализировать на лету
-        if not mlflow_ok:
-            try:
-                import mlflow
-                exp_id = _ensure_mlflow_experiment()
-                print(f"[mlflow] reinit ok for pair={pair}, exp_id={exp_id}")
-                mlflow_ok = True
-            except Exception as e:
-                print(f"[mlflow] still disabled: {e!r}")
+        y = df["y"].astype(int)
+        X = df.drop(columns=["y"])
+        # sanity: keep only numeric columns
+        X = X.select_dtypes(include=[np.number]).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-        metrics_by_model, models_full, oof = _fit_eval_all(
-            X, y, n_splits=n_splits, gap=gap, max_train_size=max_train_size,
+        # Train + OOF metrics
+        metrics_by_model, baseline, rf, lgbm, oof = _fit_eval_all(
+            X=X, y=y, n_splits=n_splits, gap=gap, max_train_size=max_train_size,
             early_stopping_rounds=early_stopping_rounds
         )
-        champ_name, champ_metrics = _choose_champion(metrics_by_model)
 
-        # save artifacts
-        pair_dir = out_pairs / pair
+        champion_name, champ_metrics = _choose_champion(metrics_by_model)
+
+        # Save artifacts under out_dir/pairs/<PAIR>/
+        base_dir = Path(out_dir)
+        pair_dir = base_dir / "pairs" / pair
         pair_dir.mkdir(parents=True, exist_ok=True)
 
-        # OOF parquet
-        oof_df = pd.DataFrame({"idx": np.arange(len(y)), "y": y.values})
-        for name, p in oof.items():
-            oof_df[f"p_{name}"] = p
+        # Save champion model
+        champ_path = pair_dir / f"model_{champion_name}.pkl"
+        model_obj = {"baseline": baseline, "rf": rf, "lgbm": (lgbm if HAS_LGB else None)}.get(champion_name)
+        with open(champ_path, "wb") as f:
+            pickle.dump(model_obj, f)
+
+        # Save OOF predictions
         oof_path = pair_dir / "oof.parquet"
-        oof_df.to_parquet(oof_path, index=False)
-
-        # models .pkl
-        saved = {}
-        for name, est in models_full.items():
-            pkl = pair_dir / f"{name}.pkl"
-            with open(pkl, "wb") as f:
-                pickle.dump(est, f)
-            saved[name] = str(pkl)
-
-        # champion copy
-        champ_path = ""
-        if champ_name in saved:
-            cp = pair_dir / "__champion.pkl"
-            with open(saved[champ_name], "rb") as src, open(cp, "wb") as dst:
-                dst.write(src.read())
-            champ_path = str(cp)
+        pd.DataFrame(oof).to_parquet(oof_path, index=False)
 
         meta = {
             "pair": pair,
-            "champion": champ_name,
-            "metrics": champ_metrics,
-            "metrics_by_model": metrics_by_model,
+            "source": source,
+            "champion": champion_name,
+            "metrics": metrics_by_model,
+            "champion_metrics": champ_metrics,
             "oof_path": str(oof_path),
-            "champion_path": champ_path,
+            "champion_path": str(champ_path),
         }
         (pair_dir / "__meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-        # MLflow logging
+        # MLflow logging (explicit experiment_id + run_id in logs)
         if mlflow_ok:
             try:
                 import mlflow
-                with mlflow.start_run(run_name=pair):
+                # end any previous active run (safety)
+                if mlflow.active_run():
+                    mlflow.end_run()
+                # start run bound to our experiment id
+                with mlflow.start_run(run_name=pair, experiment_id=exp_id) as r:
+                    print(f"[mlflow] run started pair={pair} run_id={r.info.run_id}")
                     mlflow.log_param("n_splits", n_splits)
                     mlflow.log_param("gap", gap)
                     mlflow.log_param("max_train_size", max_train_size)
@@ -412,31 +384,38 @@ def train_baseline(
                         0.0 if math.isnan(champ_metrics.get("auc", float("nan"))) else float(champ_metrics.get("auc", 0.0))
                     )
 
-                    # log models
+                    # log models (best effort)
+                    models_full = {"baseline": baseline, "rf": rf}
+                    if HAS_LGB and (lgbm is not None):
+                        models_full["lgbm"] = lgbm
                     for name, est in models_full.items():
-                        if name == "lgbm" and HAS_LGB:
-                            _mlflow_log_model_lightgbm(est, name="lgbm")
-                        else:
-                            _mlflow_log_model_sklearn(est, name=name)
+                        try:
+                            if name == "lgbm" and HAS_LGB:
+                                _mlflow_log_model_lightgbm(est, name="lgbm")
+                            else:
+                                _mlflow_log_model_sklearn(est, name=name)
+                        except Exception as e:
+                            print(f"[mlflow] model_log warn ({name}): {e!r}")
 
                     mlflow.log_artifact(str(oof_path), artifact_path="oof")
                     mlflow.log_artifact(str(pair_dir / "__meta.json"), artifact_path="meta")
             except Exception as e:
                 print(f"[mlflow] warning: {e!r}")
 
+        # Append report item
         results.append({
             "pair": pair,
-            "skipped": False,
-            "champion": champ_name,
-            "metrics": champ_metrics,
-            "models": list(models_full.keys()),
-            "meta_path": str(pair_dir / "__meta.json"),
+            "champion": champion_name,
+            "metrics": metrics_by_model,
         })
 
-    trained = [r for r in results if not r.get("skipped")]
     report = {
-        "pairs_trained": len(trained),
+        "pairs_trained": sum(1 for r in results if not r.get("skipped")),
         "pairs_total": len(results),
         "items": results,
     }
+    # write global train report
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    (Path(out_dir) / "_train_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print("[train] report → data/models/_train_report.json")
     return report

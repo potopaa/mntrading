@@ -85,7 +85,7 @@ except Exception:
 
 # ------------------------- Helpers ---------------------------
 def _save_parquet(df: pd.DataFrame, path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True>
     df.to_parquet(path, index=False)
 
 
@@ -212,7 +212,7 @@ def step_ingest(symbols_arg: str, timeframe: str, since_utc: Optional[str], limi
             ohlcv = pd.concat(frames, ignore_index=True).sort_values(["symbol", "ts"])
             _save_parquet(ohlcv, RAW_DIR / "ohlcv.parquet")
         else:
-            print("[ingest] No compatible functions in data_loader/loader.py → using CCXT fallback")
+            print("[ingest] No compatible functions in data_loader/loader.py -> using CCXT fallback")
             _fallback_ccxt_ingest(symbols, timeframe, since_utc, limit)
     else:
         _fallback_ccxt_ingest(symbols, timeframe, since_utc, limit)
@@ -227,7 +227,7 @@ def step_ingest(symbols_arg: str, timeframe: str, since_utc: Optional[str], limi
             "rows": int(len(ohlcv)),
         }
         (RAW_DIR / "ohlcv_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"[ingest] meta → {RAW_DIR/'ohlcv_meta.json'}")
+        print(f"[ingest] meta -> {RAW_DIR/'ohlcv_meta.json'}")
 
 
 def step_features(symbols_arg: str, beta_window: int, z_window: int):
@@ -286,7 +286,7 @@ def step_features(symbols_arg: str, beta_window: int, z_window: int):
             y_mean = y.rolling(win).mean()
             cov = (x * y).rolling(win).mean() - x_mean * y_mean
             var = x.rolling(win).var()
-            beta = cov / var
+            beta = cov / (var.replace(0.0, np.nan))
             alpha = y_mean - beta * x_mean
             return beta, alpha
 
@@ -329,26 +329,41 @@ def step_features(symbols_arg: str, beta_window: int, z_window: int):
             items.append({"pair": pk, "path": str(path), "features": ["a", "b", "beta", "alpha", "spread", "z"]})
     manifest = {"items": items, "features_dir": str(FEATURES_DIR.resolve())}
     (FEATURES_DIR / "_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[features] built {len(items)} pairs → {FEATURES_DIR}")
-    print(f"[features] manifest → {FEATURES_DIR / '_manifest.json'}")
+    print(f"[features] built {len(items)} pairs -> {FEATURES_DIR}")
+    print(f"[features] manifest -> {FEATURES_DIR / '_manifest.json'}")
 
 
-def step_dataset(pairs_manifest: str, label_type: str, z_th: float, lag_features: int, horizon: int):
+def step_dataset(
+    pairs_manifest: str,
+    label_type: str,
+    z_th: float,
+    lag_features: int,
+    horizon: int,
+    out_dir: Optional[str] = None,
+):
     """
     Build supervised datasets per pair from features manifest.
     Writes data/datasets/pairs/<A__B>__ds.parquet and data/datasets/_manifest.json
     """
     if not HAS_LABELS:
         raise SystemExit("features.labels not available. Please add features/labels.py with build_datasets_for_manifest().")
-    cfg = DatasetBuildConfig(label_type=label_type, zscore_threshold=float(z_th),
-                             lag_features=int(lag_features), horizon=int(horizon))
+
+    out_dir_path = Path(out_dir) if out_dir else DATASETS_DIR
+    out_dir_path.mkdir(parents=True, exist_ok=True)
+
+    cfg = DatasetBuildConfig(
+        label_type=label_type,
+        zscore_threshold=float(z_th),
+        lag_features=int(lag_features),
+        horizon=int(horizon),
+    )
     man = build_datasets_for_manifest(
         features_manifest=pairs_manifest,
-        out_dir=DATASETS_DIR,
-        cfg=cfg
+        out_dir=out_dir_path,
+        cfg=cfg,
     )
-    print(f"[dataset] built {len(man.get('items', []))} datasets → {DATASETS_DIR}")
-    print(f"[dataset] manifest → {(DATASETS_DIR.parent / '_manifest.json')}")
+    print(f"[dataset] built {len(man.get('items', []))} datasets -> {out_dir_path}")
+    print(f"[dataset] manifest -> {out_dir_path.parent / '_manifest.json'}")
 
 
 def step_train(use_dataset: bool, n_splits: int, gap: int, max_train_size: int,
@@ -370,7 +385,7 @@ def step_train(use_dataset: bool, n_splits: int, gap: int, max_train_size: int,
         proba_threshold=proba_threshold,
     )
     (MODELS_DIR / "_train_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[train] report → {MODELS_DIR / '_train_report.json'}")
+    print(f"[train] report -> {MODELS_DIR / '_train_report.json'}")
 
 
 def step_backtest(use_dataset: bool, signals_from: str, proba_threshold: float, fee_rate: float):
@@ -412,7 +427,7 @@ def step_select(summary_path: str, registry_out: str, sharpe_min: float, maxdd_m
             min_rows=min_rows,
             max_per_symbol=max_per_symbol,
         )
-        print(f"[select] registry → {registry_out}")
+        print(f"[select] registry -> {registry_out}")
         return
     except Exception as e:
         print(f"[select] models.select not available or failed: {e}")
@@ -436,7 +451,7 @@ def step_select(summary_path: str, registry_out: str, sharpe_min: float, maxdd_m
         reg = {"pairs": [{"pair": r[0], "rank": i + 1, "metrics": {"sharpe": r[1], "maxdd": r[2]}} for i, r in enumerate(rows)]}
         Path(registry_out).parent.mkdir(parents=True, exist_ok=True)
         Path(registry_out).write_text(json.dumps(reg, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"[select] registry → {registry_out}")
+        print(f"[select] registry -> {registry_out}")
 
 
 def step_promote(registry_in: str, production_map_out: str):
@@ -452,7 +467,7 @@ def step_promote(registry_in: str, production_map_out: str):
     prod = {"pairs": pairs}
     Path(production_map_out).parent.mkdir(parents=True, exist_ok=True)
     Path(production_map_out).write_text(json.dumps(prod, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[promote] production map → {production_map_out}")
+    print(f"[promote] production map -> {production_map_out}")
 
 
 # ------------------------- CLI -------------------------------
@@ -479,6 +494,8 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--zscore-threshold", type=float, default=1.5)
     ap.add_argument("--lag-features", type=int, default=1)
     ap.add_argument("--horizon", type=int, default=0)  # fixed: was type[int]
+    ap.add_argument("--out-dir", type=str, default=None,
+                    help="Optional override for datasets output directory (default: data/datasets/pairs)")
 
     # train
     ap.add_argument("--use-dataset", action="store_true")
@@ -529,7 +546,14 @@ def main():
         step_features(args.symbols, args.beta_window, args.z_window)
 
     elif mode == "dataset":
-        step_dataset(args.pairs_manifest, args.label_type, args.zscore_threshold, args.lag_features, args.horizon)
+        step_dataset(
+            args.pairs_manifest,
+            args.label_type,
+            args.zscore_threshold,
+            args.lag_features,
+            args.horizon,
+            out_dir=args.out_dir,
+        )
 
     elif mode == "train":
         step_train(args.use_dataset, args.n_splits, args.gap, args.max_train_size,
