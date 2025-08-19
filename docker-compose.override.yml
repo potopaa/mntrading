@@ -1,0 +1,37 @@
+services:
+  app:
+    environment:
+      # storage mode
+      REMOTE_ONLY: "1"
+
+      # MLflow tracking + artifact store in MinIO
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+
+      # MinIO credentials
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: adminadmin
+      AWS_DEFAULT_REGION: us-east-1
+
+      # Where to put artifacts in S3
+      MINIO_BUCKET: mlflow
+      MINIO_PREFIX: mntrading/
+
+  streamlit:
+    environment:
+      # UI runs in remote-only context too
+      REMOTE_ONLY: "1"
+
+      # MLflow (for links in footer etc.)
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+
+      # MinIO credentials (для ленивой подкачки артефактов в UI)
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: adminadmin
+      AWS_DEFAULT_REGION: us-east-1
+      MINIO_BUCKET: mlflow
+      MINIO_PREFIX: mntrading/
+
+      # путь к нашему app файлу
+      APP_PATH: ui/streamlit_app.py

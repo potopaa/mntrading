@@ -1,74 +1,50 @@
+# dags/mntrading_dataset_upload.py
 # -*- coding: utf-8 -*-
 """
-Daily dataset build + upload to MinIO.
-
-Steps:
-  1) Build datasets from features manifest.
-  2) Upload datasets/ to MinIO (same env vars as MLflow client).
-
-Note:
-- This DAG must be run by Airflow scheduler inside Linux/WSL2 or Docker container.
-- Do not execute this file directly with 'python'.
+Airflow DAG: build dataset then upload to MinIO.
+Run under Linux/WSL2. Airflow is not supported natively on Windows.
 """
-
-from __future__ import annotations
-import os
-from datetime import datetime
-
-# Safe import for different Airflow versions
-try:
-    from airflow import DAG
-except Exception as e:
-    # This will fail under native Windows or if Airflow is not installed.
-    raise RuntimeError(
-        "Airflow must run inside Linux/WSL2 or Docker. "
-        "Do not run this file with 'python'. Use Airflow scheduler."
-    ) from e
-
-# BashOperator location in Airflow 2.x
-try:
-    from airflow.operators.bash import BashOperator
-except Exception:
-    # Fallback for very old Airflow (<2.0)
-    from airflow.operators.bash_operator import BashOperator  # type: ignore
+from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.operators.bash import BashOperator
 
 default_args = {
     "owner": "airflow",
-    "retries": 0,
+    "depends_on_past": False,
+    "retries": 1,
+    "retry_delay": timedelta(minutes=5),
 }
 
 with DAG(
-    dag_id="mntrading_dataset_upload_daily",
+    dag_id="mntrading_dataset_upload",
     default_args=default_args,
-    schedule_interval="0 2 * * *",
+    description="Build dataset and upload to MinIO",
+    schedule_interval=None,
     start_date=datetime(2025, 1, 1),
     catchup=False,
-    tags=["mntrading", "datasets", "minio"],
-    description="Build datasets and upload to MinIO",
+    tags=["mntrading"],
 ) as dag:
 
     build_dataset = BashOperator(
         task_id="build_dataset",
         bash_command=(
-            "python /app/main.py "
-            "--mode dataset "
-            "--pairs-manifest /app/data/features/pairs/_manifest.json "
-            "--label-type z_threshold "
-            "--z-th 1.5 "
-            "--lag-features 10 "
-            "--horizon 3"
+            "python /app/main.py --mode dataset "
+            "--label-type z_threshold --zscore-threshold 1.5 --lag-features 10 --horizon 3"
         ),
-        env=os.environ.copy(),
     )
 
     upload_to_minio = BashOperator(
         task_id="upload_to_minio",
         bash_command=(
-            "python /app/scripts/upload_to_minio.py "
-            "--src /app/data/datasets "
-            "--prefix datasets/"
+            "python /app/scripts/upload_to_minio.py --src /app/data/datasets --prefix datasets/"
         ),
-        env=os.environ.copy(),
+        env={
+            "MLFLOW_S3_ENDPOINT_URL": "{{ var.value.get('MLFLOW_S3_ENDPOINT_URL', 'http://minio:9000') }}",
+            "AWS_ACCESS_KEY_ID": "{{ var.value.get('AWS_ACCESS_KEY_ID', 'admin') }}",
+            "AWS_SECRET_ACCESS_KEY": "{{ var.value.get('AWS_SECRET_ACCESS_KEY', 'adminadmin') }}",
+            "AWS_DEFAULT_REGION": "{{ var.value.get('AWS_DEFAULT_REGION', 'us-east-1') }}",
+            "MINIO_BUCKET": "{{ var.value.get('MINIO_BUCKET', 'mlflow') }}",
+        },
     )
 
     build_dataset >> upload_to_minio

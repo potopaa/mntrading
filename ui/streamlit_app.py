@@ -1,258 +1,206 @@
+# ui/streamlit_app.py
 # -*- coding: utf-8 -*-
 """
-Streamlit UI for MNTrading pipeline:
-- Short and Full pipeline buttons
-- Step-by-step execution controls
-- Artifacts preview (datasets/backtest/portfolio)
-- Simple charts (backtest curves, equity)
-- Links to MLflow UI
-
-This app assumes it runs inside the Docker container with /app as project root.
+Streamlit UI to run the pipeline with sidebar parameters:
+- Run full or short pipeline with one click
+- Configure step parameters in sidebar
+- Show backtest summary and latest report
+All comments are in English.
 """
-
 import os
-import sys
 import json
-import glob
-import time
 import subprocess
 from pathlib import Path
-from typing import List, Dict, Optional
 
-import pandas as pd
 import streamlit as st
+import pandas as pd
+
+# Optional: lazy fetch from MinIO when local artifacts are missing
+S3_ENABLED = any(os.getenv(k) for k in ("MLFLOW_S3_ENDPOINT_URL", "MINIO_BUCKET"))
+SINK = None
+if S3_ENABLED:
+    try:
+        from utils.minio_io import MinioSink  # requires boto3 in the image
+        SINK = MinioSink.from_env(enabled=True)
+    except Exception:
+        SINK = None
+
+def fetch_if_missing(local_path: Path, s3_key: str | None = None, s3_prefix: str | None = None, is_dir: bool = False):
+    """Try to fetch artifact from MinIO if not present locally."""
+    if local_path.exists():
+        return
+    if not SINK:
+        return
+    try:
+        if is_dir and s3_prefix:
+            SINK.download_dir(s3_prefix, local_path)
+        elif s3_key:
+            if SINK.exists(s3_key):
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                SINK.download_file(s3_key, local_path)
+    except Exception:
+        pass
 
 APP_ROOT = Path("/app").resolve()
 DATA_DIR = APP_ROOT / "data"
-MLFLOW_UI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000").replace("mlflow", "localhost")
+BT_SUMMARY = DATA_DIR / "backtest_results" / "_summary.json"
+REPORT_MD = DATA_DIR / "portfolio" / "_latest_report.md"
 
-st.set_page_config(page_title="MNTrading Pipeline", layout="wide")
+def run_cmd(cmd: list[str]) -> str:
+    """Run a command and capture combined output."""
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    out = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+    return out.strip()
 
-# -------------------------------
-# Helpers
-# -------------------------------
-def run_cmd(cmd: List[str], env: Optional[Dict[str, str]] = None) -> int:
-    """Run a shell command and stream output into Streamlit."""
-    st.write(f"`$ {' '.join(cmd)}`")
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        cwd=str(APP_ROOT),
-        env=env or os.environ.copy(),
-    )
-    lines = []
-    status = st.status("Running...", expanded=True)
-    with status:
-        for line in iter(proc.stdout.readline, ""):
-            lines.append(line)
-            st.write(line.rstrip("\n"))
-    proc.wait()
-    rc = proc.returncode
-    if rc == 0:
-        status.update(label="Done", state="complete")
-    else:
-        status.update(label=f"Failed (exit={rc})", state="error")
-    return rc
+st.set_page_config(page_title="MNTrading", layout="wide")
+st.title("MNTrading — pipeline control")
 
-def run_step(mode: str, extra: Optional[List[str]] = None) -> int:
-    """Run one pipeline step via main.py --mode <mode>."""
-    cmd = [sys.executable, str(APP_ROOT / "main.py"), "--mode", mode]
-    if extra:
-        cmd.extend(extra)
-    return run_cmd(cmd)
-
-def run_pipeline(steps: List[List[str]]) -> bool:
-    """Run multiple steps: each element is ['mode', *extra]. Stop on first failure."""
-    for spec in steps:
-        mode, *extra = spec
-        st.subheader(f"Step: {mode}")
-        rc = run_step(mode, extra)
-        if rc != 0:
-            st.error(f"Step `{mode}` failed with exit code {rc}")
-            return False
-    return True
-
-def read_any_parquet_or_csv(paths: List[Path]) -> Optional[pd.DataFrame]:
-    """Read the first existing parquet/csv from given list of paths."""
-    for p in paths:
-        if p.suffix.lower() == ".parquet" and p.exists():
-            try:
-                return pd.read_parquet(p)
-            except Exception:
-                pass
-        if p.suffix.lower() == ".csv" and p.exists():
-            try:
-                return pd.read_csv(p)
-            except Exception:
-                pass
-    return None
-
-def list_files(pattern: str, limit: int = 20) -> List[Path]:
-    """List files by glob pattern."""
-    return [Path(p) for p in sorted(glob.glob(pattern))][-limit:]
-
-def mlflow_link() -> str:
-    """Return MLflow UI link."""
-    if MLFLOW_UI.startswith("http"):
-        return MLFLOW_UI
-    return "http://localhost:5000"
-
-# -------------------------------
-# Sidebar controls
-# -------------------------------
-st.sidebar.title("Controls")
-
-with st.sidebar.expander("Pipeline steps", expanded=True):
-    step_names = [
-        "screen", " ingest", " features", " dataset", " train",
-        " backtest", " select", " promote", " inference", " aggregate", " report"
-    ]
-    st.write(", ".join(step_names))
-
-short_btn = st.sidebar.button("Run SHORT pipeline", use_container_width=True)
-full_btn = st.sidebar.button("Run FULL pipeline", type="primary", use_container_width=True)
-
-st.sidebar.markdown("---")
-st.sidebar.markdown(f"[Open MLflow]({mlflow_link()})")
-
-# -------------------------------
-# Main layout with tabs
-# -------------------------------
-tab_overview, tab_run, tab_artifacts, tab_reports, tab_mlflow = st.tabs(
-    ["Overview", "Run pipeline", "Artifacts", "Reports/Charts", "MLflow"]
-)
-
-with tab_overview:
-    st.markdown("### MNTrading — Demo UI")
-    st.write(
-        "Use the sidebar buttons to run SHORT or FULL pipelines. "
-        "You can also execute steps one-by-one from the **Run pipeline** tab."
-    )
-    st.info("Airflow is recommended for scheduled runs; this UI is for interactive demo.")
-
-with tab_run:
-    st.markdown("### Run steps individually")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("screen"):
-            run_step("screen")
-        if st.button("features"):
-            run_step("features")
-        if st.button("train"):
-            run_step("train")
-        if st.button("select"):
-            run_step("select")
-        if st.button("aggregate"):
-            run_step("aggregate")
-
-    with col2:
-        if st.button("ingest"):
-            run_step("ingest")
-        if st.button("dataset"):
-            # Default label params; adjust if needed
-            extra = ["--label-type", "z_threshold", "--z-th", "1.5", "--lag-features", "10", "--horizon", "3"]
-            run_step("dataset", extra)
-        if st.button("backtest"):
-            run_step("backtest")
-        if st.button("promote"):
-            run_step("promote")
-        if st.button("report"):
-            run_step("report")
+with st.sidebar:
+    st.header("Parameters")
+    # Ingest 1h universe
+    uni_symbols = st.text_area("Universe symbols (CSV)", "BTC/USDT,ETH/USDT,SOL/USDT")
+    since_1h = st.text_input("since-utc for 1h", "2025-01-01T00:00:00Z")
+    limit_1h = st.number_input("limit per page (1h)", min_value=100, max_value=20000, value=5000, step=100)
 
     st.markdown("---")
-    st.markdown("#### One-click")
-    if short_btn:
-        st.success("Starting SHORT pipeline…")
-        short_flow = [
-            ["screen"],
-            ["ingest"],
-            ["features"],
-            ["dataset", "--label-type", "z_threshold", "--z-th", "1.5", "--lag-features", "10", "--horizon", "3"],
-            ["train"],
-            ["backtest"],
-            ["select"],
+    # Screen -> auto ingest 5m
+    since_5m = st.text_input("since-utc for 5m (after screen)", "2025-01-01T00:00:00Z")
+    limit_5m = st.number_input("limit per page (5m)", min_value=100, max_value=20000, value=1000, step=100)
+
+    st.markdown("---")
+    # Features
+    beta_window = st.number_input("beta window", min_value=50, max_value=5000, value=1000, step=50)
+    z_window = st.number_input("z window", min_value=50, max_value=5000, value=300, step=10)
+
+    st.markdown("---")
+    # Dataset
+    label_type = st.selectbox("label type", ["z_threshold", "revert_direction"])
+    z_th = st.number_input("zscore threshold", min_value=0.1, max_value=5.0, value=1.5, step=0.1)
+    lag_features = st.number_input("lag features", min_value=0, max_value=100, value=10, step=1)
+    horizon = st.number_input("horizon", min_value=1, max_value=100, value=3, step=1)
+
+    st.markdown("---")
+    # Train & Backtest
+    n_splits = st.number_input("n_splits", min_value=2, max_value=20, value=5, step=1)
+    gap = st.number_input("gap", min_value=0, max_value=1000, value=24, step=1)
+    proba_th = st.number_input("proba threshold", min_value=0.0, max_value=1.0, value=0.55, step=0.01)
+    signals_from = st.selectbox("signals from", ["auto","model","z"])
+    fee_rate = st.number_input("fee rate", min_value=0.0, max_value=0.01, value=0.0005, step=0.0001)
+
+    st.markdown("---")
+    top_k = st.number_input("top-K portfolio", min_value=1, max_value=100, value=10, step=1)
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    st.subheader("Universe (1h)")
+    if st.button("Ingest 1h universe"):
+        cmd = ["python","/app/main.py","--mode","ingest","--symbols",uni_symbols,"--timeframe","1h","--since-utc",since_1h,"--limit",str(int(limit_1h))]
+        st.code(" ".join(cmd), language="bash")
+        st.text(run_cmd(cmd))
+
+with col2:
+    st.subheader("Screen (1h) → auto 5m")
+    if st.button("Screen cointegration and ingest 5m"):
+        cmd = ["python","/app/main.py","--mode","screen","--since-utc-5m",since_5m,"--limit-5m",str(int(limit_5m))]
+        st.code(" ".join(cmd), language="bash")
+        st.text(run_cmd(cmd))
+
+with col3:
+    st.subheader("Features on 5m")
+    if st.button("Build features"):
+        cmd = ["python","/app/main.py","--mode","features","--symbols","/app/data/pairs/screened_pairs_*.json","--beta-window",str(int(beta_window)),"--z-window",str(int(z_window))]
+        st.code(" ".join(cmd), language="bash")
+        st.text(run_cmd(cmd))
+
+st.markdown("---")
+col4, col5, col6 = st.columns(3)
+with col4:
+    st.subheader("Dataset")
+    if st.button("Build dataset"):
+        cmd = ["python","/app/main.py","--mode","dataset","--label-type",label_type,"--zscore-threshold",str(float(z_th)),"--lag-features",str(int(lag_features)),"--horizon",str(int(horizon))]
+        st.code(" ".join(cmd), language="bash")
+        st.text(run_cmd(cmd))
+
+with col5:
+    st.subheader("Train & Backtest")
+    if st.button("Train models"):
+        cmd = ["python","/app/main.py","--mode","train","--use-dataset","--n-splits",str(int(n_splits)),"--gap",str(int(gap)),"--proba-threshold",str(float(proba_th))]
+        st.code(" ".join(cmd), language="bash")
+        st.text(run_cmd(cmd))
+    if st.button("Backtest"):
+        cmd = ["python","/app/main.py","--mode","backtest","--signals-from",signals_from,"--proba-threshold",str(float(proba_th)),"--fee-rate",str(float(fee_rate))]
+        st.code(" ".join(cmd), language="bash")
+        st.text(run_cmd(cmd))
+
+with col6:
+    st.subheader("Select & Promote")
+    if st.button("Select champions"):
+        cmd = ["python","/app/main.py","--mode","select"]
+        st.code(" ".join(cmd), language="bash")
+        st.text(run_cmd(cmd))
+    if st.button("Promote"):
+        cmd = ["python","/app/main.py","--mode","promote"]
+        st.code(" ".join(cmd), language="bash")
+        st.text(run_cmd(cmd))
+
+st.markdown("---")
+st.subheader("Run pipeline shortcuts")
+c1, c2 = st.columns(2)
+with c1:
+    if st.button("Run SHORT pipeline"):
+        steps = [
+            ["python","/app/main.py","--mode","screen"],
+            ["python","/app/main.py","--mode","features","--symbols","/app/data/pairs/screened_pairs_*.json","--beta-window",str(int(beta_window)),"--z-window",str(int(z_window))],
+            ["python","/app/main.py","--mode","dataset","--label-type",label_type,"--zscore-threshold",str(float(z_th)),"--lag-features",str(int(lag_features)),"--horizon",str(int(horizon))],
+            ["python","/app/main.py","--mode","train","--use-dataset","--n-splits",str(int(n_splits)),"--gap",str(int(gap)),"--proba-threshold",str(float(proba_th))],
+            ["python","/app/main.py","--mode","backtest","--signals-from",signals_from,"--proba-threshold",str(float(proba_th)),"--fee-rate",str(float(fee_rate))],
+            ["python","/app/main.py","--mode","select"],
         ]
-        ok = run_pipeline(short_flow)
-        if ok:
-            st.success("SHORT pipeline completed.")
+        for cmd in steps:
+            st.code(" ".join(cmd), language="bash")
+            st.text(run_cmd(cmd))
 
-    if full_btn:
-        st.success("Starting FULL pipeline…")
-        full_flow = [
-            ["screen"],
-            ["ingest"],
-            ["features"],
-            ["dataset", "--label-type", "z_threshold", "--z-th", "1.5", "--lag-features", "10", "--horizon", "3"],
-            ["train"],
-            ["backtest"],
-            ["select"],
-            ["promote"],
-            ["inference"],
-            ["aggregate"],
-            ["report"],
+with c2:
+    if st.button("Run FULL pipeline (except ingest 1h)"):
+        steps = [
+            ["python","/app/main.py","--mode","screen","--since-utc-5m",since_5m,"--limit-5m",str(int(limit_5m))],
+            ["python","/app/main.py","--mode","features","--symbols","/app/data/pairs/screened_pairs_*.json","--beta-window",str(int(beta_window)),"--z-window",str(int(z_window))],
+            ["python","/app/main.py","--mode","dataset","--label-type",label_type,"--zscore-threshold",str(float(z_th)),"--lag-features",str(int(lag_features)),"--horizon",str(int(horizon))],
+            ["python","/app/main.py","--mode","train","--use-dataset","--n-splits",str(int(n_splits)),"--gap",str(int(gap)),"--proba-threshold",str(float(proba_th))],
+            ["python","/app/main.py","--mode","backtest","--signals-from",signals_from,"--proba-threshold",str(float(proba_th)),"--fee-rate",str(float(fee_rate))],
+            ["python","/app/main.py","--mode","select"],
+            ["python","/app/main.py","--mode","promote"],
+            ["python","/app/main.py","--mode","inference","--registry-in","/app/data/models/production_map.json","--update"],
+            ["python","/app/main.py","--mode","aggregate","--top-k",str(int(top_k)),"--proba-threshold",str(float(proba_th))],
+            ["python","/app/main.py","--mode","report"],
         ]
-        ok = run_pipeline(full_flow)
-        if ok:
-            st.success("FULL pipeline completed.")
+        for cmd in steps:
+            st.code(" ".join(cmd), language="bash")
+            st.text(run_cmd(cmd))
 
-with tab_artifacts:
-    st.markdown("### Artifacts preview")
+st.markdown("---")
+st.subheader("Artifacts")
 
-    # Datasets manifest
-    ds_manifest = DATA_DIR / "datasets" / "_manifest.json"
-    if ds_manifest.exists():
-        st.subheader("datasets/_manifest.json")
-        st.code(ds_manifest.read_text()[:10000])
+# Try to fetch missing artifacts before displaying
+fetch_if_missing(BT_SUMMARY, s3_key="backtest/_summary.json")
+fetch_if_missing(REPORT_MD, s3_key="portfolio/_latest_report.md")
+
+colA, colB = st.columns(2)
+with colA:
+    st.write("Backtest summary")
+    if BT_SUMMARY.exists():
+        obj = json.loads(BT_SUMMARY.read_text(encoding="utf-8"))
+        st.json(obj)
     else:
-        st.warning("datasets/_manifest.json not found")
+        st.info("No backtest summary yet.")
 
-    # Backtest summary files (try parquet/csv)
-    st.subheader("Backtest results")
-    candidates = list_files(str(DATA_DIR / "backtest_results" / "**" / "summary.parquet")) \
-              +  list_files(str(DATA_DIR / "backtest_results" / "**" / "summary.csv"))
-    if candidates:
-        df_bt = read_any_parquet_or_csv(candidates)
-        if df_bt is not None and not df_bt.empty:
-            st.dataframe(df_bt.tail(200), use_container_width=True)
-        else:
-            st.info("No readable summary found.")
+with colB:
+    st.write("Latest report")
+    if REPORT_MD.exists():
+        st.markdown(REPORT_MD.read_text(encoding="utf-8"))
     else:
-        st.info("No backtest summaries found.")
+        st.info("No report yet.")
 
-    # Portfolio/equity
-    st.subheader("Portfolio / equity curve")
-    eq_candidates = [
-        DATA_DIR / "portfolio" / "equity_curve.parquet",
-        DATA_DIR / "portfolio" / "equity_curve.csv",
-    ]
-    df_eq = read_any_parquet_or_csv(eq_candidates)
-    if df_eq is not None and not df_eq.empty:
-        numeric_cols = df_eq.select_dtypes("number").columns.tolist()
-        if numeric_cols:
-            st.line_chart(df_eq[numeric_cols])
-        st.dataframe(df_eq.tail(200), use_container_width=True)
-    else:
-        st.info("No equity curve found.")
-
-with tab_reports:
-    st.markdown("### Reports")
-    rpt_files = list_files(str(DATA_DIR / "report" / "**" / "*.html")) \
-             +  list_files(str(DATA_DIR / "report" / "**" / "*.md")) \
-             +  list_files(str(DATA_DIR / "report" / "**" / "*.txt"))
-    if rpt_files:
-        for p in rpt_files:
-            st.write(f"**{p.relative_to(DATA_DIR)}**")
-            try:
-                st.code(p.read_text()[:10000])
-            except Exception:
-                st.write("Binary or non-UTF8 file — preview skipped.")
-    else:
-        st.info("No report files found.")
-
-with tab_mlflow:
-    st.markdown("### MLflow")
-    st.write("Open MLflow UI to inspect experiments and artifacts:")
-    st.markdown(f"- {mlflow_link()}")
+mlflow_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+st.caption(f"MLflow: {mlflow_uri}")
