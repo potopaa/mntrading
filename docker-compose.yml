@@ -100,31 +100,20 @@ services:
     command: ["bash","-lc","tail -f /dev/null"]
 
   streamlit:
-    build: .
-    container_name: mntrading-ui
+    command: >
+      bash -lc "streamlit run $APP_PATH --server.address 0.0.0.0 --server.port 8501"
+    environment:
+      - APP_PATH=ui/streamlit_app.py
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=adminadmin
+      - AWS_DEFAULT_REGION=us-east-1
+      - MINIO_BUCKET=mlflow
+      - MINIO_PREFIX=mntrading/
+    ports:
+      - "8501:8501"
     depends_on:
       - app
-    restart: unless-stopped
-    environment:
-      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
-      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
-      STREAMLIT_PORT: ${STREAMLIT_PORT}
-    command: >
-      bash -lc "
-        APP_PATH=ui/streamlit_app.py;
-        if [ ! -f "$APP_PATH" ]; then
-          echo '[ui] streamlit_app.py not found'; ls -la; exit 1;
-        fi
-        echo "[ui] starting $APP_PATH";
-        exec streamlit run "$APP_PATH" \
-          --server.address 0.0.0.0 \
-          --server.port ${STREAMLIT_PORT}
-      "
-    ports:
-      - "${STREAMLIT_PORT}:${STREAMLIT_PORT}"
-    volumes:
-      - .:/app
-      - ./data:/app/data
+      - mlflow
+      - minio

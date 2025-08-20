@@ -1,162 +1,219 @@
-# -*- coding: utf-8 -*-
-"""
-Build supervised datasets (X, y) for pairs from features parquet files.
+# features/labels.py
+# All comments are in English by request.
 
-- Robust manifest reader: accepts path (str/Path), dict, or list of entries.
-- Safe datetime index handling: sort, drop duplicate timestamps.
-- Lagged features (to avoid lookahead).
-- Forecast horizon: shift labels forward.
-- Label types:
-    * "z_threshold": y = 1 if abs(z.shift(-H)) > z_th else 0
-    * "revert_direction":
-        y_raw ∈ {-1, 0, +1}:
-            if z > z_th  -> y_raw = -1  (short spread; expect mean reversion down)
-            if z < -z_th -> y_raw = +1  (long spread;  expect mean reversion up)
-            else         -> y_raw = 0   (no signal)
-        We drop y_raw==0 and convert {-1,+1}→{0,1} for binary classifiers.
-- Outputs:
-    * Per-pair dataset parquet files in data/datasets/pairs
-    * Manifest at data/datasets/_manifest.json (list of items with path)
-"""
 from __future__ import annotations
-
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Union, Tuple
-
+from typing import Dict, List, Optional
 import json
-import pandas as pd
-import numpy as np
+import os
+from pathlib import Path
 
+import numpy as np
+import pandas as pd
+from pandas.api.types import is_datetime64_any_dtype, is_datetime64tz_dtype
+
+# ----- config -----
 
 @dataclass
 class DatasetBuildConfig:
-    label_type: str = "z_threshold"
+    label_type: str = "z_threshold"   # "z_threshold" | "revert_direction"
     zscore_threshold: float = 1.5
-    lag_features: int = 1
-    horizon: int = 0  # shift label into the future by H bars
+    lag_features: int = 10
+    horizon: int = 3
 
+DATASET_MIN_ROWS = int(os.getenv("DATASET_MIN_ROWS", "200"))
+DATASET_DEBUG = os.getenv("DATASET_DEBUG", "0").lower() in ("1", "true", "yes", "on")
 
-def _to_dtindex(df: pd.DataFrame) -> pd.DataFrame:
-    # Make sure we have a datetime index named 'ts'
-    if "ts" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
-        df = df.set_index(pd.to_datetime(df["ts"], utc=True, errors="coerce"))
-    elif not isinstance(df.index, pd.DatetimeIndex):
-        df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
-    df = df[~df.index.duplicated(keep="last")].sort_index()
-    df.index.name = "ts"
+def _d(msg: str) -> None:
+    if DATASET_DEBUG:
+        print(f"[labels] {msg}")
+
+# ----- helpers -----
+
+def _norm_pair_key(pair: str) -> str:
+    return pair.replace("/", "_")
+
+def _read_manifest(features_manifest: str | Path) -> List[Dict]:
+    p = Path(features_manifest)
+    if not p.exists():
+        raise FileNotFoundError(f"Features manifest not found: {p}")
+    obj = json.loads(p.read_text(encoding="utf-8"))
+    items = obj.get("items") or []
+    out = []
+    for it in items:
+        pair = it.get("pair") or it.get("name") or it.get("key")
+        path = it.get("path") or it.get("parquet") or it.get("file")
+        if pair and path:
+            out.append({"pair": str(pair), "path": str(path)})
+    return out
+
+def _ensure_schema(df: pd.DataFrame) -> pd.DataFrame:
+    # ts
+    ts_col = None
+    for c in ["ts","timestamp","time","date","datetime"]:
+        if c in df.columns:
+            ts_col = c; break
+    if ts_col is None:
+        raise ValueError("Features frame must contain time column (ts/timestamp/...).")
+    if ts_col != "ts":
+        df = df.rename(columns={ts_col: "ts"})
+
+    # z-score
+    z_col = None
+    for c in ["z","zscore","z_score","spread_z"]:
+        if c in df.columns:
+            z_col = c; break
+    if z_col is None:
+        raise ValueError("Features frame must contain z-score column (z/zscore/z_score/spread_z).")
+    if z_col != "z":
+        df = df.rename(columns={z_col: "z"})
+
+    # optional: spread, beta, alpha
+    if "spread" not in df.columns:
+        for c in ["spr","residual"]:
+            if c in df.columns:
+                df = df.rename(columns={c: "spread"}); break
+    if "beta" not in df.columns:
+        for c in ["coef","slope"]:
+            if c in df.columns:
+                df = df.rename(columns={c: "beta"}); break
+    if "alpha" not in df.columns:
+        for c in ["intercept","const"]:
+            if c in df.columns:
+                df = df.rename(columns={c: "alpha"}); break
+
+    # dtypes
+    if not is_datetime64_any_dtype(df["ts"]):
+        df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+    else:
+        if is_datetime64tz_dtype(df["ts"]):
+            try:
+                df["ts"] = df["ts"].dt.tz_convert("UTC")
+            except Exception:
+                df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+        else:
+            df["ts"] = df["ts"].dt.tz_localize("UTC")
+
+    df = df.dropna(subset=["ts", "z"]).sort_values("ts").reset_index(drop=True)
+    df["z"] = pd.to_numeric(df["z"], errors="coerce").astype("float64")
+    if "spread" in df.columns:
+        df["spread"] = pd.to_numeric(df["spread"], errors="coerce").astype("float64")
+    if "beta" in df.columns:
+        df["beta"] = pd.to_numeric(df["beta"], errors="coerce").astype("float64")
+    if "alpha" in df.columns:
+        df["alpha"] = pd.to_numeric(df["alpha"], errors="coerce").astype("float64")
     return df
 
+def _make_lags(s: pd.Series, n: int, prefix: str) -> pd.DataFrame:
+    out = {}
+    for i in range(1, int(n)+1):
+        out[f"{prefix}_lag{i}"] = s.shift(i)
+    return pd.DataFrame(out)
 
-def _read_parquet(path: Union[str, Path]) -> pd.DataFrame:
-    df = pd.read_parquet(path)
-    return _to_dtindex(df)
+# ----- targets -----
 
+def _target_z_threshold(df: pd.DataFrame, horizon: int, thr: float) -> pd.Series:
+    z = df["z"].astype("float64")
+    z_fut = z.shift(-int(horizon))
+    event = (z.abs() >= float(thr))
+    revert = (z * z_fut <= 0) | (z_fut.abs() < z.abs())
+    y = (event & revert).astype("int8")
+    return y
 
-def _read_manifest(man: Union[str, Path, Dict[str, Any], List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-    if isinstance(man, (str, Path)):
-        obj = json.loads(Path(man).read_text(encoding="utf-8"))
-    else:
-        obj = man
-    if isinstance(obj, dict):
-        if "items" in obj:
-            items = obj["items"]
-        elif "pairs" in obj:
-            # legacy format: list of pair keys without paths
-            # try to infer paths under the same directory
-            base = Path(man).parent if isinstance(man, (str, Path)) else Path("data/features/pairs")
-            items = []
-            for pk in obj["pairs"]:
-                safe = pk.replace("/", "_")
-                items.append({"pair": pk, "path": str((base / safe / "features.parquet").resolve())})
-        else:
-            items = []
-    elif isinstance(obj, list):
-        items = obj
-    else:
-        items = []
-    # normalize fields
-    norm = []
-    for it in items:
-        pair = it.get("pair") or f"{it.get('a','')}__{it.get('b','')}"
-        path = it.get("path")
-        if pair and path:
-            norm.append({"pair": pair, "path": path})
-    return norm
+def _target_revert_direction(df: pd.DataFrame, horizon: int) -> pd.Series:
+    z = df["z"].astype("float64")
+    z_fut = z.shift(-int(horizon))
+    y = (z_fut.abs() < z.abs()).astype("int8")
+    return y
 
+# ----- build single dataset -----
 
-def build_dataset_from_features(
-    df: pd.DataFrame,
-    cfg: DatasetBuildConfig
-) -> pd.DataFrame:
-    """
-    Given a features DataFrame with columns ['a','b','beta','alpha','spread','z'],
-    produce a supervised dataset with lagged features and labels.
-    """
-    df = _to_dtindex(df)
-    cols = ["spread", "z", "beta", "alpha", "a", "b"]
-    for c in cols:
-        if c not in df.columns:
-            raise ValueError(f"Required column '{c}' not in features")
-    X = df[["z", "spread", "beta", "alpha"]].copy()
-    # add lags
-    for k in range(1, int(cfg.lag_features) + 1):
-        X[f"z_lag{k}"] = X["z"].shift(k)
-        X[f"spread_lag{k}"] = X["spread"].shift(k)
-    # labels
+def _build_single_pair_dataset(pair: str, feat_path: Path, cfg: DatasetBuildConfig) -> Optional[pd.DataFrame]:
+    if not feat_path.exists():
+        _d(f"skip {pair}: features parquet missing: {feat_path}")
+        return None
+
+    df = pd.read_parquet(feat_path)
+    df = _ensure_schema(df)
+
+    feats = {"z": df["z"]}
+    if "spread" in df.columns: feats["spread"] = df["spread"]
+    if "beta" in df.columns:   feats["beta"] = df["beta"]
+    if "alpha" in df.columns:  feats["alpha"] = df["alpha"]
+    X = pd.DataFrame(feats, index=df.index)
+
+    if cfg.lag_features and cfg.lag_features > 0:
+        X = pd.concat(
+            [
+                X,
+                _make_lags(df["z"], cfg.lag_features, "z"),
+                _make_lags(df["spread"], cfg.lag_features, "spread") if "spread" in df.columns else pd.DataFrame(index=df.index),
+            ],
+            axis=1,
+        )
+
     if cfg.label_type == "z_threshold":
-        y = (df["z"].shift(-cfg.horizon).abs() > float(cfg.zscore_threshold)).astype("int8")
-        y.name = "y"
-        out = pd.concat([X, y], axis=1).dropna()
+        y = _target_z_threshold(df, cfg.horizon, cfg.zscore_threshold)
+        rows = (df["z"].abs() >= float(cfg.zscore_threshold))  # keep only event rows
     elif cfg.label_type == "revert_direction":
-        z = df["z"]
-        y_raw = pd.Series(0, index=z.index, dtype="int8")
-        y_raw[z > float(cfg.zscore_threshold)] = -1
-        y_raw[z < -float(cfg.zscore_threshold)] = +1
-        # shift into the future if horizon>0 (we bet now on direction over next H bars)
-        if cfg.horizon:
-            y_raw = y_raw.shift(-cfg.horizon)
-        # keep only signals (drop 0)
-        mask = y_raw != 0
-        X = X.loc[mask]
-        y = y_raw.loc[mask].map({-1:0, +1:1}).astype("int8")
-        y.name = "y"
-        out = pd.concat([X, y], axis=1).dropna()
+        y = _target_revert_direction(df, cfg.horizon)
+        rows = pd.Series(True, index=df.index)
     else:
         raise ValueError(f"Unknown label_type: {cfg.label_type}")
-    out.index.name = "ts"
-    return out.reset_index()
 
+    out = pd.DataFrame({"ts": df["ts"]})
+    out = pd.concat([out, X, y.rename("y")], axis=1)
+    out = out.loc[rows].dropna().reset_index(drop=True)
+
+    if len(out) < DATASET_MIN_ROWS:
+        _d(f"skip {pair}: rows {len(out)} < DATASET_MIN_ROWS({DATASET_MIN_ROWS})")
+        return None
+
+    out["pair"] = pair
+    _d(f"ok {pair}: rows={len(out)}")
+    return out
+
+# ----- public API -----
 
 def build_datasets_for_manifest(
-    features_manifest: Union[str, Path, Dict[str, Any], List[Dict[str, Any]]],
-    out_dir: Union[str, Path],
-    cfg: Optional[DatasetBuildConfig] = None
-) -> Dict[str, Any]:
-    """
-    For each features parquet in manifest, build a dataset parquet and manifest.
-    """
-    cfg = cfg or DatasetBuildConfig()
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    features_manifest: str | Path,
+    out_dir: str | Path,
+    cfg: DatasetBuildConfig,
+) -> Dict:
     items = _read_manifest(features_manifest)
-    built_items: List[Dict[str, Any]] = []
+    out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+
+    built = []
+    total_pairs = 0
+
     for it in items:
-        pair = it["pair"]
-        path = it["path"]
-        try:
-            fdf = _read_parquet(path)
-            ds = build_dataset_from_features(fdf, cfg)
-            safe = pair.replace("/", "_")
-            p_out = out_dir / f"{safe}__ds.parquet"
-            ds.to_parquet(p_out, index=False)
-            built_items.append({"pair": pair, "path": str(p_out.resolve()), "rows": int(len(ds))})
-        except Exception as e:
-            # skip pair on error
+        pair = str(it["pair"]); total_pairs += 1
+        feat_path = Path(it["path"])
+        if not feat_path.exists():
+            guess = Path("data/features/pairs") / _norm_pair_key(pair) / "features.parquet"
+            if guess.exists(): feat_path = guess
+
+        ds = _build_single_pair_dataset(pair, feat_path, cfg)
+        if ds is None:
             continue
-    man = {"items": built_items, "label_type": cfg.label_type, "zscore_threshold": cfg.zscore_threshold,
-           "lag_features": cfg.lag_features, "horizon": cfg.horizon}
-    # write datasets manifest one level up (data/datasets/_manifest.json)
-    manifest_path = out_dir.parent / "_manifest.json"
-    manifest_path.write_text(json.dumps(man, ensure_ascii=False, indent=2), encoding="utf-8")
-    return man
+
+        pair_key = _norm_pair_key(pair)
+        pdir = out_dir / pair_key; pdir.mkdir(parents=True, exist_ok=True)
+        out_path = pdir / "dataset.parquet"
+        ds.to_parquet(out_path, index=False)
+        built.append({"pair": pair, "path": str(out_path), "rows": int(len(ds)),
+                      "features": [c for c in ds.columns if c not in ("ts","y","pair")]})
+
+    manifest = {
+        "items": built,
+        "total_pairs": total_pairs,
+        "built_pairs": len(built),
+        "min_rows": DATASET_MIN_ROWS,
+        "label_type": cfg.label_type,
+        "zscore_threshold": cfg.zscore_threshold,
+        "lag_features": cfg.lag_features,
+        "horizon": cfg.horizon,
+        "out_dir": str(Path(out_dir).resolve()),
+    }
+    (out_dir.parent / "_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return manifest

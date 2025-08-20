@@ -1,206 +1,249 @@
 # ui/streamlit_app.py
-# -*- coding: utf-8 -*-
-"""
-Streamlit UI to run the pipeline with sidebar parameters:
-- Run full or short pipeline with one click
-- Configure step parameters in sidebar
-- Show backtest summary and latest report
-All comments are in English.
-"""
+# All comments are in English by request.
+
 import os
-import json
 import subprocess
 from pathlib import Path
+from datetime import datetime
 
 import streamlit as st
-import pandas as pd
 
-# Optional: lazy fetch from MinIO when local artifacts are missing
-S3_ENABLED = any(os.getenv(k) for k in ("MLFLOW_S3_ENDPOINT_URL", "MINIO_BUCKET"))
-SINK = None
-if S3_ENABLED:
-    try:
-        from utils.minio_io import MinioSink  # requires boto3 in the image
-        SINK = MinioSink.from_env(enabled=True)
-    except Exception:
-        SINK = None
 
-def fetch_if_missing(local_path: Path, s3_key: str | None = None, s3_prefix: str | None = None, is_dir: bool = False):
-    """Try to fetch artifact from MinIO if not present locally."""
-    if local_path.exists():
-        return
-    if not SINK:
-        return
-    try:
-        if is_dir and s3_prefix:
-            SINK.download_dir(s3_prefix, local_path)
-        elif s3_key:
-            if SINK.exists(s3_key):
-                local_path.parent.mkdir(parents=True, exist_ok=True)
-                SINK.download_file(s3_key, local_path)
-    except Exception:
-        pass
+APP_ROOT = Path("/app")
+DATA = APP_ROOT / "data"
 
-APP_ROOT = Path("/app").resolve()
-DATA_DIR = APP_ROOT / "data"
-BT_SUMMARY = DATA_DIR / "backtest_results" / "_summary.json"
-REPORT_MD = DATA_DIR / "portfolio" / "_latest_report.md"
+# Helper to run shell commands inside the container.
+def run(cmd: str) -> str:
+    """Run a shell command and capture combined output."""
+    proc = subprocess.run(
+        ["bash", "-lc", cmd],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        cwd=str(APP_ROOT),
+    )
+    return proc.stdout
 
-def run_cmd(cmd: list[str]) -> str:
-    """Run a command and capture combined output."""
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    out = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
-    return out.strip()
 
-st.set_page_config(page_title="MNTrading", layout="wide")
-st.title("MNTrading — pipeline control")
+def header():
+    st.set_page_config(page_title="MNTrading", layout="wide")
+    st.title("MNTrading — Pipeline UI")
+    st.caption("Buttons call the same CLI steps you ran from PowerShell (one-liners).")
 
-with st.sidebar:
-    st.header("Parameters")
-    # Ingest 1h universe
-    uni_symbols = st.text_area("Universe symbols (CSV)", "BTC/USDT,ETH/USDT,SOL/USDT")
-    since_1h = st.text_input("since-utc for 1h", "2025-01-01T00:00:00Z")
-    limit_1h = st.number_input("limit per page (1h)", min_value=100, max_value=20000, value=5000, step=100)
 
-    st.markdown("---")
-    # Screen -> auto ingest 5m
-    since_5m = st.text_input("since-utc for 5m (after screen)", "2025-01-01T00:00:00Z")
-    limit_5m = st.number_input("limit per page (5m)", min_value=100, max_value=20000, value=1000, step=100)
+def sidebar_params():
+    st.sidebar.header("Pipeline parameters")
 
-    st.markdown("---")
-    # Features
-    beta_window = st.number_input("beta window", min_value=50, max_value=5000, value=1000, step=50)
-    z_window = st.number_input("z window", min_value=50, max_value=5000, value=300, step=10)
+    st.sidebar.subheader("Universe / Ingest(1h)")
+    exchange = st.sidebar.text_input("Exchange", "binance")
+    quote = st.sidebar.text_input("Quote", "USDT")
+    top = st.sidebar.number_input("Top symbols", min_value=10, max_value=500, value=200, step=10)
+    since_1h = st.sidebar.text_input("since-utc (1h)", "2025-01-01T00:00:00Z")
+    limit_1h = st.sidebar.number_input("limit per call (1h)", min_value=100, max_value=5000, value=1000, step=100)
+    max_candles = st.sidebar.number_input("max-candles (0=all)", min_value=0, max_value=10_000_000, value=0, step=1000)
 
-    st.markdown("---")
-    # Dataset
-    label_type = st.selectbox("label type", ["z_threshold", "revert_direction"])
-    z_th = st.number_input("zscore threshold", min_value=0.1, max_value=5.0, value=1.5, step=0.1)
-    lag_features = st.number_input("lag features", min_value=0, max_value=100, value=10, step=1)
-    horizon = st.number_input("horizon", min_value=1, max_value=100, value=3, step=1)
+    st.sidebar.subheader("Screen → Ingest(5m)")
+    since_5m = st.sidebar.text_input("since-utc-5m", "2025-01-01T00:00:00Z")
+    limit_5m = st.sidebar.number_input("limit-5m", min_value=100, max_value=50000, value=1000, step=100)
 
-    st.markdown("---")
-    # Train & Backtest
-    n_splits = st.number_input("n_splits", min_value=2, max_value=20, value=5, step=1)
-    gap = st.number_input("gap", min_value=0, max_value=1000, value=24, step=1)
-    proba_th = st.number_input("proba threshold", min_value=0.0, max_value=1.0, value=0.55, step=0.01)
-    signals_from = st.selectbox("signals from", ["auto","model","z"])
-    fee_rate = st.number_input("fee rate", min_value=0.0, max_value=0.01, value=0.0005, step=0.0001)
+    st.sidebar.subheader("Features")
+    beta_window = st.sidebar.number_input("beta-window", min_value=50, max_value=5000, value=1000, step=50)
+    z_window = st.sidebar.number_input("z-window", min_value=50, max_value=2000, value=300, step=50)
 
-    st.markdown("---")
-    top_k = st.number_input("top-K portfolio", min_value=1, max_value=100, value=10, step=1)
+    st.sidebar.subheader("Dataset")
+    label_type = st.sidebar.selectbox("label-type", options=["z_threshold", "revert_direction"], index=0)
+    z_thr = st.sidebar.number_input("zscore-threshold", min_value=0.5, max_value=5.0, value=1.5, step=0.1)
+    lag_features = st.sidebar.number_input("lag-features", min_value=0, max_value=100, value=10, step=1)
+    horizon = st.sidebar.number_input("horizon", min_value=1, max_value=100, value=3, step=1)
 
-col1, col2, col3 = st.columns(3)
+    st.sidebar.subheader("Training/CV")
+    n_splits = st.sidebar.number_input("n-splits", min_value=2, max_value=20, value=5, step=1)
+    gap = st.sidebar.number_input("gap", min_value=0, max_value=1000, value=24, step=1)
+    early_stop = st.sidebar.number_input("early-stopping-rounds", min_value=0, max_value=1000, value=50, step=5)
 
-with col1:
-    st.subheader("Universe (1h)")
-    if st.button("Ingest 1h universe"):
-        cmd = ["python","/app/main.py","--mode","ingest","--symbols",uni_symbols,"--timeframe","1h","--since-utc",since_1h,"--limit",str(int(limit_1h))]
-        st.code(" ".join(cmd), language="bash")
-        st.text(run_cmd(cmd))
+    st.sidebar.subheader("Signals / Portfolio")
+    proba_thr = st.sidebar.number_input("proba-threshold", min_value=0.5, max_value=1.0, value=0.55, step=0.01)
+    top_k = st.sidebar.number_input("top-k", min_value=1, max_value=200, value=20, step=1)
 
-with col2:
-    st.subheader("Screen (1h) → auto 5m")
-    if st.button("Screen cointegration and ingest 5m"):
-        cmd = ["python","/app/main.py","--mode","screen","--since-utc-5m",since_5m,"--limit-5m",str(int(limit_5m))]
-        st.code(" ".join(cmd), language="bash")
-        st.text(run_cmd(cmd))
+    return dict(
+        exchange=exchange, quote=quote, top=int(top),
+        since_1h=since_1h, limit_1h=int(limit_1h), max_candles=int(max_candles),
+        since_5m=since_5m, limit_5m=int(limit_5m),
+        beta_window=int(beta_window), z_window=int(z_window),
+        label_type=label_type, z_thr=float(z_thr), lag_features=int(lag_features), horizon=int(horizon),
+        n_splits=int(n_splits), gap=int(gap), early_stop=int(early_stop),
+        proba_thr=float(proba_thr), top_k=int(top_k),
+    )
 
-with col3:
-    st.subheader("Features on 5m")
-    if st.button("Build features"):
-        cmd = ["python","/app/main.py","--mode","features","--symbols","/app/data/pairs/screened_pairs_*.json","--beta-window",str(int(beta_window)),"--z-window",str(int(z_window))]
-        st.code(" ".join(cmd), language="bash")
-        st.text(run_cmd(cmd))
 
-st.markdown("---")
-col4, col5, col6 = st.columns(3)
-with col4:
-    st.subheader("Dataset")
-    if st.button("Build dataset"):
-        cmd = ["python","/app/main.py","--mode","dataset","--label-type",label_type,"--zscore-threshold",str(float(z_th)),"--lag-features",str(int(lag_features)),"--horizon",str(int(horizon))]
-        st.code(" ".join(cmd), language="bash")
-        st.text(run_cmd(cmd))
+def section_actions(p):
+    st.header("Actions")
 
-with col5:
-    st.subheader("Train & Backtest")
-    if st.button("Train models"):
-        cmd = ["python","/app/main.py","--mode","train","--use-dataset","--n-splits",str(int(n_splits)),"--gap",str(int(gap)),"--proba-threshold",str(float(proba_th))]
-        st.code(" ".join(cmd), language="bash")
-        st.text(run_cmd(cmd))
-    if st.button("Backtest"):
-        cmd = ["python","/app/main.py","--mode","backtest","--signals-from",signals_from,"--proba-threshold",str(float(proba_th)),"--fee-rate",str(float(fee_rate))]
-        st.code(" ".join(cmd), language="bash")
-        st.text(run_cmd(cmd))
+    col1, col2, col3 = st.columns(3)
 
-with col6:
-    st.subheader("Select & Promote")
-    if st.button("Select champions"):
-        cmd = ["python","/app/main.py","--mode","select"]
-        st.code(" ".join(cmd), language="bash")
-        st.text(run_cmd(cmd))
-    if st.button("Promote"):
-        cmd = ["python","/app/main.py","--mode","promote"]
-        st.code(" ".join(cmd), language="bash")
-        st.text(run_cmd(cmd))
+    with col1:
+        if st.button("Ingest 1h (auto universe)"):
+            cmd = (
+                "python /app/main.py --mode ingest --symbols-auto "
+                f"--exchange {p['exchange']} --quote {p['quote']} --top {p['top']} "
+                f"--timeframe 1h --since-utc {p['since_1h']} --limit {p['limit_1h']} --max-candles {p['max_candles']}"
+            )
+            st.code(cmd)
+            st.text(run(cmd))
 
-st.markdown("---")
-st.subheader("Run pipeline shortcuts")
-c1, c2 = st.columns(2)
-with c1:
-    if st.button("Run SHORT pipeline"):
-        steps = [
-            ["python","/app/main.py","--mode","screen"],
-            ["python","/app/main.py","--mode","features","--symbols","/app/data/pairs/screened_pairs_*.json","--beta-window",str(int(beta_window)),"--z-window",str(int(z_window))],
-            ["python","/app/main.py","--mode","dataset","--label-type",label_type,"--zscore-threshold",str(float(z_th)),"--lag-features",str(int(lag_features)),"--horizon",str(int(horizon))],
-            ["python","/app/main.py","--mode","train","--use-dataset","--n-splits",str(int(n_splits)),"--gap",str(int(gap)),"--proba-threshold",str(float(proba_th))],
-            ["python","/app/main.py","--mode","backtest","--signals-from",signals_from,"--proba-threshold",str(float(proba_th)),"--fee-rate",str(float(fee_rate))],
-            ["python","/app/main.py","--mode","select"],
-        ]
-        for cmd in steps:
-            st.code(" ".join(cmd), language="bash")
-            st.text(run_cmd(cmd))
+        if st.button("Screen + Ingest 5m for screened"):
+            cmd = (
+                "python /app/main.py --mode screen "
+                f"--since-utc-5m {p['since_5m']} --limit-5m {p['limit_5m']}"
+            )
+            st.code(cmd)
+            st.text(run(cmd))
 
-with c2:
-    if st.button("Run FULL pipeline (except ingest 1h)"):
-        steps = [
-            ["python","/app/main.py","--mode","screen","--since-utc-5m",since_5m,"--limit-5m",str(int(limit_5m))],
-            ["python","/app/main.py","--mode","features","--symbols","/app/data/pairs/screened_pairs_*.json","--beta-window",str(int(beta_window)),"--z-window",str(int(z_window))],
-            ["python","/app/main.py","--mode","dataset","--label-type",label_type,"--zscore-threshold",str(float(z_th)),"--lag-features",str(int(lag_features)),"--horizon",str(int(horizon))],
-            ["python","/app/main.py","--mode","train","--use-dataset","--n-splits",str(int(n_splits)),"--gap",str(int(gap)),"--proba-threshold",str(float(proba_th))],
-            ["python","/app/main.py","--mode","backtest","--signals-from",signals_from,"--proba-threshold",str(float(proba_th)),"--fee-rate",str(float(fee_rate))],
-            ["python","/app/main.py","--mode","select"],
-            ["python","/app/main.py","--mode","promote"],
-            ["python","/app/main.py","--mode","inference","--registry-in","/app/data/models/production_map.json","--update"],
-            ["python","/app/main.py","--mode","aggregate","--top-k",str(int(top_k)),"--proba-threshold",str(float(proba_th))],
-            ["python","/app/main.py","--mode","report"],
-        ]
-        for cmd in steps:
-            st.code(" ".join(cmd), language="bash")
-            st.text(run_cmd(cmd))
+        if st.button("Features"):
+            cmd = (
+                "python /app/main.py --mode features "
+                "--symbols '/app/data/pairs/screened_pairs_*.json' "
+                f"--beta-window {p['beta_window']} --z-window {p['z_window']}"
+            )
+            st.code(cmd)
+            st.text(run(cmd))
 
-st.markdown("---")
-st.subheader("Artifacts")
+        if st.button("Dataset"):
+            cmd = (
+                "python /app/main.py --mode dataset "
+                f"--label-type {p['label_type']} --zscore-threshold {p['z_thr']} "
+                f"--lag-features {p['lag_features']} --horizon {p['horizon']}"
+            )
+            st.code(cmd)
+            st.text(run(cmd))
 
-# Try to fetch missing artifacts before displaying
-fetch_if_missing(BT_SUMMARY, s3_key="backtest/_summary.json")
-fetch_if_missing(REPORT_MD, s3_key="portfolio/_latest_report.md")
+    with col2:
+        if st.button("Train"):
+            cmd = (
+                "python /app/main.py --mode train --use-dataset "
+                f"--n-splits {p['n_splits']} --gap {p['gap']} "
+                f"--early-stopping-rounds {p['early_stop']} --proba-threshold {p['proba_thr']}"
+            )
+            st.code(cmd)
+            st.text(run(cmd))
 
-colA, colB = st.columns(2)
-with colA:
-    st.write("Backtest summary")
-    if BT_SUMMARY.exists():
-        obj = json.loads(BT_SUMMARY.read_text(encoding="utf-8"))
-        st.json(obj)
+        if st.button("Backtest"):
+            cmd = (
+                "python /app/main.py --mode backtest "
+                f"--signals-from auto --proba-threshold {p['proba_thr']} --fee-rate 0.0005"
+            )
+            st.code(cmd)
+            st.text(run(cmd))
+
+        if st.button("Select champions"):
+            cmd = (
+                "python /app/main.py --mode select "
+                "--summary-path /app/data/backtest_results/_summary.json "
+                "--registry-out /app/data/models/registry.json "
+                "--sharpe-min 0.0 --maxdd-max 1.0 "
+                f"--top-k {p['top_k']}"
+            )
+            st.code(cmd)
+            st.text(run(cmd))
+
+        if st.button("Promote to production map"):
+            cmd = (
+                "python /app/main.py --mode promote "
+                "--registry-in /app/data/models/registry.json "
+                "--production-map-out /app/data/models/production_map.json"
+            )
+            st.code(cmd)
+            st.text(run(cmd))
+
+    with col3:
+        if st.button("Inference"):
+            cmd = (
+                "python /app/main.py --mode inference "
+                "--registry-in /app/data/models/registry.json "
+                f"--signals-from model --proba-threshold {p['proba_thr']} "
+                "--n-last 1 --update"
+            )
+            st.code(cmd)
+            st.text(run(cmd))
+
+        if st.button("Aggregate"):
+            cmd = (
+                "python /app/main.py --mode aggregate "
+                "--signals-dir /app/data/signals "
+                "--portfolio-dir /app/data/portfolio "
+                f"--proba-threshold {p['proba_thr']} --top-k {p['top_k']}"
+            )
+            st.code(cmd)
+            st.text(run(cmd))
+
+        if st.button("Generate report"):
+            cmd = (
+                "python /app/portfolio/report_latest.py "
+                "--orders-json /app/data/portfolio/latest_orders.json "
+                "--backtest-summary /app/data/backtest_results/_summary.json "
+                "--out /app/data/portfolio/_latest_report.md"
+            )
+            st.code(cmd)
+            st.text(run(cmd))
+
+        if st.button("Upload to MinIO"):
+            cmd = (
+                "python /app/scripts/upload_to_minio.py "
+                "/app/data/features /app/data/datasets /app/data/models "
+                "/app/data/backtest_results /app/data/portfolio"
+            )
+            st.code(cmd)
+            st.text(run(cmd))
+
+        if st.button("Log to MLflow"):
+            cmd = (
+                "python /app/scripts/log_to_mlflow.py "
+                "--experiment mntrading "
+                "--train-report /app/data/models/_train_report.json "
+                "--backtest-summary /app/data/backtest_results/_summary.json "
+                "--models-dir /app/data/models/pairs "
+                "--artifacts /app/data/portfolio/_latest_report.md "
+                "--artifacts /app/data/portfolio/latest_orders.json "
+                "--registry /app/data/models/registry.json "
+                "--prod-map /app/data/models/production_map.json"
+            )
+            st.code(cmd)
+            st.text(run(cmd))
+
+    st.subheader("Full pipeline (1-click)")
+    if st.button("Run FULL pipeline"):
+        with st.status("Running full pipeline...", expanded=True) as status:
+            steps = [
+                ("Ingest 1h", f"python /app/main.py --mode ingest --symbols-auto --exchange {p['exchange']} --quote {p['quote']} --top {p['top']} --timeframe 1h --since-utc {p['since_1h']} --limit {p['limit_1h']} --max-candles {p['max_candles']}"),
+                ("Screen+5m", f"python /app/main.py --mode screen --since-utc-5m {p['since_5m']} --limit-5m {p['limit_5m']}"),
+                ("Features", f"python /app/main.py --mode features --symbols '/app/data/pairs/screened_pairs_*.json' --beta-window {p['beta_window']} --z-window {p['z_window']}"),
+                ("Dataset", f"python /app/main.py --mode dataset --label-type {p['label_type']} --zscore-threshold {p['z_thr']} --lag-features {p['lag_features']} --horizon {p['horizon']}"),
+                ("Train", f"python /app/main.py --mode train --use-dataset --n-splits {p['n_splits']} --gap {p['gap']} --early-stopping-rounds {p['early_stop']} --proba-threshold {p['proba_thr']}"),
+                ("Backtest", f"python /app/main.py --mode backtest --signals-from auto --proba-threshold {p['proba_thr']} --fee-rate 0.0005"),
+                ("Select", f"python /app/main.py --mode select --summary-path /app/data/backtest_results/_summary.json --registry-out /app/data/models/registry.json --sharpe-min 0.0 --maxdd-max 1.0 --top-k {p['top_k']}"),
+                ("Promote", "python /app/main.py --mode promote --registry-in /app/data/models/registry.json --production-map-out /app/data/models/production_map.json"),
+                ("Inference", f"python /app/main.py --mode inference --registry-in /app/data/models/registry.json --signals-from model --proba-threshold {p['proba_thr']} --n-last 1 --update"),
+                ("Aggregate", f"python /app/main.py --mode aggregate --signals-dir /app/data/signals --portfolio-dir /app/data/portfolio --proba-threshold {p['proba_thr']} --top-k {p['top_k']}"),
+                ("Report", "python /app/portfolio/report_latest.py --orders-json /app/data/portfolio/latest_orders.json --backtest-summary /app/data/backtest_results/_summary.json --out /app/data/portfolio/_latest_report.md"),
+            ]
+            for name, cmd in steps:
+                st.write(f"**{name}** → `{cmd}`")
+                st.text(run(cmd))
+            status.update(label="Full pipeline finished", state="complete")
+
+    st.subheader("Artifacts")
+    report = DATA / "portfolio" / "_latest_report.md"
+    if report.exists():
+        st.markdown(report.read_text(encoding="utf-8"))
     else:
-        st.info("No backtest summary yet.")
+        st.info("No report yet. Click **Generate report** after aggregate.")
 
-with colB:
-    st.write("Latest report")
-    if REPORT_MD.exists():
-        st.markdown(REPORT_MD.read_text(encoding="utf-8"))
-    else:
-        st.info("No report yet.")
 
-mlflow_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
-st.caption(f"MLflow: {mlflow_uri}")
+def main():
+    header()
+    p = sidebar_params()
+    section_actions(p)
+
+
+if __name__ == "__main__":
+    main()

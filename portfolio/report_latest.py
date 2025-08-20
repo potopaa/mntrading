@@ -1,168 +1,184 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""
-Generate a small human-readable report for the latest portfolio orders.
-
-Defaults:
-  - orders json: data/portfolio/latest_orders.json
-  - backtest summary: data/backtest_results/_summary.json
-  - markdown out: data/portfolio/_latest_report.md
-
-Works with no args (so a naked subprocess call from Streamlit is fine).
-"""
+# portfolio/report_latest.py
+# All comments are in English by request.
 
 from __future__ import annotations
-
 import json
-import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
+from datetime import datetime
 
 import click
-import numpy as np
-import pandas as pd
 
 
-# ------------------------- helpers -------------------------
-def _utf8_stdio():
+def _read_json(p: Path) -> Any:
+    if not p.exists():
+        raise FileNotFoundError(f"File not found: {p}")
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def _read_jsonl(p: Path) -> List[Dict[str, Any]]:
+    """Read JSONL file into a list of dicts."""
+    if not p.exists():
+        raise FileNotFoundError(f"File not found: {p}")
+    out: List[Dict[str, Any]] = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            out.append(obj)
+    return out
+
+
+def _try_load_orders(orders_json: Path) -> List[Dict[str, Any]]:
+    """
+    Try to load orders from latest_orders.json.
+    Supported shapes:
+      A) {"orders": [ {...}, ... ]}
+      B) {"orders_path": "...jsonl"} -> load from JSONL
+      C) {"selected": [ {"pair":..., "side":..., "proba":...}, ... ]}  (fallback)
+    """
+    obj = _read_json(orders_json)
+    # A)
+    if isinstance(obj, dict) and isinstance(obj.get("orders"), list):
+        return list(obj["orders"])
+    # B)
+    orders_path = obj.get("orders_path") if isinstance(obj, dict) else None
+    if isinstance(orders_path, str):
+        jp = Path(orders_path)
+        if not jp.is_absolute():
+            jp = orders_json.parent / jp
+        return _read_jsonl(jp)
+    # C) fallback: "selected"
+    sel = obj.get("selected") if isinstance(obj, dict) else None
+    if isinstance(sel, list):
+        return list(sel)
+    # As a last resort, accept list top-level
+    if isinstance(obj, list):
+        return obj
+    raise ValueError(f"Unsupported latest_orders.json format: {orders_json}")
+
+
+def _load_backtest_metrics(summary_path: Optional[Path]) -> Dict[str, Dict[str, float]]:
+    """
+    Return mapping pair -> {"sharpe":..., "maxdd":...}, robust to formats:
+      {"pairs": { "PAIR": {"metrics": {...}} }}  or
+      {"pairs": [ {"pair":"...", "metrics": {...}}, ... ]}
+    """
+    if not summary_path:
+        return {}
+    obj = _read_json(summary_path)
+    pairs = obj.get("pairs")
+    out: Dict[str, Dict[str, float]] = {}
+    if isinstance(pairs, dict):
+        for pair, d in pairs.items():
+            met = d.get("metrics", {}) if isinstance(d, dict) else {}
+            if isinstance(met, dict):
+                out[str(pair)] = {
+                    "sharpe": float(met.get("sharpe", 0.0)),
+                    "maxdd": float(met.get("maxdd", 0.0)),
+                }
+    elif isinstance(pairs, list):
+        for it in pairs:
+            if not isinstance(it, dict):
+                continue
+            pair = it.get("pair") or it.get("name") or it.get("key")
+            met = it.get("metrics", {})
+            if pair and isinstance(met, dict):
+                out[str(pair)] = {
+                    "sharpe": float(met.get("sharpe", 0.0)),
+                    "maxdd": float(met.get("maxdd", 0.0)),
+                }
+    return out
+
+
+def _fmt_side(v: Any) -> str:
+    """
+    Normalize side to pretty text.
+    Accept +/-1, "long"/"short", "buy"/"sell".
+    """
+    if isinstance(v, (int, float)):
+        if v > 0:
+            return "LONG"
+        if v < 0:
+            return "SHORT"
+        return "FLAT"
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("long", "buy", "1", "+1"):
+            return "LONG"
+        if s in ("short", "sell", "-1"):
+            return "SHORT"
+        return s.upper()
+    return str(v)
+
+
+def _render_markdown(orders: List[Dict[str, Any]], metrics: Dict[str, Dict[str, float]]) -> str:
+    dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
+    lines: List[str] = []
+    lines.append(f"# MNTrading — Latest Orders Report")
+    lines.append("")
+    lines.append(f"_Generated at: **{dt}**_")
+    lines.append("")
+    lines.append("## Selected Orders")
+    lines.append("")
+    lines.append("| Pair | Side | Proba | Notes |")
+    lines.append("|---|---:|---:|---|")
+    for o in orders:
+        pair = str(o.get("pair") or o.get("symbol") or o.get("pair_key") or "?")
+        side = _fmt_side(o.get("side"))
+        proba = o.get("proba")
+        try:
+            proba_s = f"{float(proba):.3f}" if proba is not None else ""
+        except Exception:
+            proba_s = str(proba) if proba is not None else ""
+        note = o.get("note") or ""
+        lines.append(f"| {pair} | {side} | {proba_s} | {note} |")
+
+    # Metrics section (optional)
+    if metrics:
+        lines.append("")
+        lines.append("## Backtest Metrics (per pair)")
+        lines.append("")
+        lines.append("| Pair | Sharpe | MaxDD |")
+        lines.append("|---|---:|---:|")
+        for pair, met in metrics.items():
+            lines.append(f"| {pair} | {met.get('sharpe', 0.0):.3f} | {met.get('maxdd', 0.0):.4f} |")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+@click.command()
+@click.option("--orders-json", type=click.Path(path_type=Path), required=True, help="Path to latest_orders.json produced by aggregator.")
+@click.option("--backtest-summary", type=click.Path(path_type=Path), required=False, help="Path to backtest _summary.json for metrics (optional).")
+@click.option("--out", "out_path", type=click.Path(path_type=Path), required=True, help="Output Markdown file path.")
+def main(orders_json: Path, backtest_summary: Optional[Path], out_path: Path):
+    """Build human-readable Markdown report from latest_orders.json (and optionally backtest summary)."""
+    orders = _try_load_orders(orders_json)
+    metrics = _load_backtest_metrics(backtest_summary) if backtest_summary else {}
+
+    md = _render_markdown(orders, metrics)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(md, encoding="utf-8")
+
+    # Also maintain a convenient symlink-like copy name if user prefers
+    # (on Windows/FAT we just duplicate the file).
+    latest_alias = out_path.parent / "_latest_report.md"
     try:
-        sys.stdout.reconfigure(encoding="utf-8")
-        sys.stderr.reconfigure(encoding="utf-8")
+        latest_alias.write_text(md, encoding="utf-8")
     except Exception:
         pass
 
+    print(f"[report] wrote {out_path}")
 
-def now_utc() -> pd.Timestamp:
-    return pd.Timestamp.now(tz="UTC")
-
-
-def _load_latest_orders(path: Path) -> List[dict]:
-    if not path.exists():
-        return []
-    try:
-        obj = json.loads(path.read_text(encoding="utf-8"))
-        arr = obj.get("orders") if isinstance(obj, dict) else obj
-        if isinstance(arr, list):
-            # basic validation
-            out = []
-            for it in arr:
-                if isinstance(it, dict) and "pair" in it:
-                    out.append(it)
-            return out
-        return []
-    except Exception:
-        return []
-
-
-def _load_backtest_summary(path: Path) -> Dict[str, dict]:
-    if not path.exists():
-        return {}
-    try:
-        obj = json.loads(path.read_text(encoding="utf-8"))
-        pairs = obj.get("pairs") or {}
-        mp: Dict[str, dict] = {}
-        for k, v in pairs.items():
-            met = (v or {}).get("metrics") or {}
-            mp[str(k)] = {
-                "sharpe": met.get("sharpe"),
-                "maxdd": met.get("maxdd"),
-                "equity_last": met.get("equity_last"),
-                "n_bars": met.get("n_bars"),
-                "n_trades": met.get("n_trades"),
-            }
-        return mp
-    except Exception:
-        return {}
-
-
-def _fmt(x, digits=4):
-    try:
-        if x is None or (isinstance(x, float) and (np.isnan(x) or np.isinf(x))):
-            return "-"
-        if isinstance(x, float):
-            return f"{x:.{digits}f}"
-        return str(x)
-    except Exception:
-        return "-"
-
-
-# ------------------------- core -------------------------
-def build_markdown(orders: List[dict], bt: Dict[str, dict]) -> str:
-    ts = now_utc().strftime("%Y-%m-%d %H:%M:%S UTC")
-    if not orders:
-        return (
-            f"# Latest Portfolio Report\n\n"
-            f"_Generated: {ts}_\n\n"
-            f"**No orders found.** Make sure you ran the aggregator.\n"
-        )
-
-    # summary
-    total = len(orders)
-    gross_total = float(sum(max(0.0, float(it.get("gross_notional", 0.0))) for it in orders))
-    long_n = sum(1 for it in orders if (it.get("side_spread") == "long_spread"))
-    short_n = sum(1 for it in orders if (it.get("side_spread") == "short_spread"))
-
-    md = []
-    md.append("# Latest Portfolio Report")
-    md.append("")
-    md.append(f"_Generated: {ts}_")
-    md.append("")
-    md.append(f"- Orders: **{total}**  |  Gross notional: **{_fmt(gross_total, 2)}**")
-    md.append(f"- Sides: long={long_n}, short={short_n}")
-    md.append("")
-
-    # table header
-    md.append("| Pair | Side | Proba | Gross | A_px | B_px | Beta | Sharpe | MaxDD |")
-    md.append("|:-----|:-----|------:|------:|-----:|-----:|-----:|------:|------:|")
-
-    for it in orders:
-        pair = str(it.get("pair", "-"))
-        side = str(it.get("side_spread", "-"))
-        proba = _fmt(it.get("proba"), 3)
-        gross = _fmt(it.get("gross_notional"), 2)
-        px = it.get("px") or {}
-        a_px = _fmt(px.get("a"), 6)
-        b_px = _fmt(px.get("b"), 6)
-        beta = _fmt(px.get("beta"), 4)
-
-        met = bt.get(pair) or {}
-        sharpe = _fmt(met.get("sharpe"), 3)
-        maxdd = _fmt(met.get("maxdd"), 3)
-
-        md.append(f"| {pair} | {side} | {proba} | {gross} | {a_px} | {b_px} | {beta} | {sharpe} | {maxdd} |")
-
-    md.append("")
-    md.append("> Sources: data/portfolio/latest_orders.json, data/backtest_results/_summary.json")
-    md.append("")
-    return "\n".join(md)
-
-
-# --------------------------- CLI ---------------------------
-@click.command()
-@click.option("--orders-json", default="data/portfolio/latest_orders.json", show_default=True,
-              type=click.Path(exists=True, dir_okay=False))
-@click.option("--backtest-summary", default="data/backtest_results/_summary.json", show_default=True,
-              type=click.Path(exists=False, dir_okay=False))
-@click.option("--out-markdown", default="data/portfolio/_latest_report.md", show_default=True,
-              type=click.Path(dir_okay=False))
-def main(orders_json: str, backtest_summary: str, out_markdown: str):
-    _utf8_stdio()
-
-    orders = _load_latest_orders(Path(orders_json))
-    bt = _load_backtest_summary(Path(backtest_summary))
-
-    md = build_markdown(orders, bt)
-    out_p = Path(out_markdown)
-    out_p.parent.mkdir(parents=True, exist_ok=True)
-    out_p.write_text(md, encoding="utf-8")
-
-    # Friendly console output for Streamlit to show
-    print("[report] wrote markdown:", out_p)
-    if orders:
-        print("[report] orders:", len(orders), "gross_total:", _fmt(sum(float(it.get('gross_notional', 0.0)) for it in orders), 2))
-    else:
-        print("[report] no orders to report")
 
 if __name__ == "__main__":
     main()
