@@ -16,6 +16,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
 
   setup-minio:
     image: minio/mc:latest
@@ -34,86 +35,60 @@ services:
   mlflow:
     build: .
     container_name: mntrading-mlflow
-    depends_on:
-      - setup-minio
     working_dir: /app
+    depends_on:
+      setup-minio:
+        condition: service_completed_successfully
     environment:
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-admin}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-adminadmin}
       AWS_DEFAULT_REGION: us-east-1
       MINIO_BUCKET: ${MINIO_BUCKET:-mlflow}
-      MLFLOW_ARTIFACTS_DESTINATION: s3://${MINIO_BUCKET:-mlflow}/experiments
-    command: [
-      "mlflow","server",
-      "--host","0.0.0.0",
-      "--port","5000",
-      "--backend-store-uri","sqlite:////app/mlflow/mlflow.db",
-      "--artifacts-destination","s3://${MINIO_BUCKET}",
-      "--gunicorn-opts","--timeout 300"
-    ]
+    command:
+      - bash
+      - -lc
+      - >
+        mlflow server
+        --host 0.0.0.0
+        --port 5000
+        --backend-store-uri sqlite:////app/mlflow/mlflow.db
+        --artifacts-destination s3://${MINIO_BUCKET}
+        --gunicorn-opts "--timeout 300"
     ports:
-      - "${MLFLOW_PORT}:5000"
+      - "${MLFLOW_PORT:-5000}:5000"
     volumes:
       - ./mlflow:/app/mlflow
-
-  # NEW: FastAPI server (см. api/server.py)
-  api:
-    build: .
-    container_name: mntrading-api
-    depends_on:
-      - mlflow
-    environment:
-      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
-      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
-    command: >
-      bash -lc "
-        exec uvicorn api.server:app --host 0.0.0.0 --port 8000
-      "
-    ports:
-      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5000/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     restart: unless-stopped
-    volumes:
-      - .:/app
-      - ./data:/app/data
-      - ./mlruns:/app/mlruns
 
   app:
     build: .
     container_name: mntrading-app
     depends_on:
-      - mlflow
+      mlflow:
+        condition: service_healthy
     environment:
-      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
-      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
-      MLFLOW_REGISTER: "1"
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
+      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL:-http://minio:9000}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-admin}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-adminadmin}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
     volumes:
       - .:/app
       - ./data:/app/data
-      - ./mlruns:/app/mlruns
     command: ["bash","-lc","tail -f /dev/null"]
+    healthcheck:
+      test: ["CMD-SHELL", "python - <<'PY'\nimport mlflow,os; print(mlflow.get_tracking_uri())\nPY"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
 
-  streamlit:
-    command: >
-      bash -lc "streamlit run $APP_PATH --server.address 0.0.0.0 --server.port 8501"
-    environment:
-      - APP_PATH=ui/streamlit_app.py
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
-      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
-      - AWS_ACCESS_KEY_ID=admin
-      - AWS_SECRET_ACCESS_KEY=adminadmin
-      - AWS_DEFAULT_REGION=us-east-1
-      - MINIO_BUCKET=mlflow
-      - MINIO_PREFIX=mntrading/
-    ports:
-      - "8501:8501"
-    depends_on:
-      - app
-      - mlflow
-      - minio
+networks:
+  default:
+    name: mntrading-net

@@ -543,224 +543,139 @@ def step_train(use_dataset: bool, n_splits: int, gap: int, max_train_size: int, 
     report_path = MODELS_DIR / "_train_report.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     _upload_dir(MODELS_DIR, "models/")
+
+    # ---- MLflow registration & challenger/champion promotion (injected) ----
+    try:
+        import os, json as _json, statistics as _stats
+        import mlflow
+        from mlflow.tracking import MlflowClient
+
+        # Aggregate AUC over champions across pairs (fallback to accuracy if AUC missing)
+        aucs = []
+        accs = []
+        for item in (report.get("items") or []):
+            if item.get("skipped"):
+                continue
+            met = (item.get("metrics") or {}).get(item.get("champion") or "", {})
+            if isinstance(met, dict):
+                if "auc" in met and isinstance(met["auc"], (int, float)):
+                    aucs.append(float(met["auc"]))
+                if "accuracy" in met and isinstance(met["accuracy"], (int, float)):
+                    accs.append(float(met["accuracy"]))
+        agg_auc = float(_stats.fmean(aucs)) if aucs else None
+        agg_acc = float(_stats.fmean(accs)) if accs else None
+
+        exp_name = os.getenv("MLFLOW_EXPERIMENT_NAME", "mntrading")
+        mlflow.set_experiment(exp_name)
+        with mlflow.start_run(run_name="train_full", nested=True) as run:
+            if agg_auc is not None:
+                mlflow.log_metric("oof_auc_mean", agg_auc)
+            if agg_acc is not None:
+                mlflow.log_metric("oof_acc_mean", agg_acc)
+            mlflow.log_artifact(str(report_path), artifact_path="reports")
+            # Log the whole models dir as a bundle
+            mlflow.log_artifacts(str(MODELS_DIR), artifact_path="bundle")
+            run_id = run.info.run_id
+
+        client = MlflowClient()
+        model_name = os.getenv("MLFLOW_MODEL_NAME", "mntrading_model")
+        mv = client.create_model_version(
+            name=model_name,
+            source=f"runs:/{run_id}/bundle",
+            run_id=run_id
+        )
+
+        # Simple challenger/champion: compare oof_auc_mean (or oof_acc_mean)
+        def _get_metric(rid, key):
+            r = client.get_run(rid)
+            return r.data.metrics.get(key)
+
+        # Find current Production, if any
+        current_prod = None
+        for v in client.search_model_versions(f"name='{model_name}'"):
+            if v.current_stage == "Production":
+                current_prod = v
+                break
+
+        new_auc = _get_metric(run_id, "oof_auc_mean")
+        new_acc = _get_metric(run_id, "oof_acc_mean")
+
+        better = False
+        if current_prod is None:
+            better = True
+        else:
+            old_auc = _get_metric(current_prod.run_id, "oof_auc_mean")
+            old_acc = _get_metric(current_prod.run_id, "oof_acc_mean")
+            # Prefer AUC if available, else accuracy
+            if new_auc is not None and old_auc is not None:
+                better = (new_auc >= old_auc)
+            elif new_acc is not None and old_acc is not None:
+                better = (new_acc >= old_acc)
+            elif new_auc is not None and old_auc is None:
+                better = True
+            elif new_acc is not None and old_acc is None:
+                better = True
+
+        if better:
+            if current_prod is not None:
+                client.transition_model_version_stage(model_name, current_prod.version, stage="Archived")
+            client.transition_model_version_stage(model_name, mv.version, stage="Production")
+            print(f"[mlflow] Promoted {model_name} v{mv.version} to Production")
+        else:
+            client.transition_model_version_stage(model_name, mv.version, stage="Staging")
+            print(f"[mlflow] Registered {model_name} v{mv.version} to Staging")
+    except Exception as e:
+        print(f"[mlflow] WARN: registration/promotion skipped: {e}")
+    # ---- end MLflow block ----
     print(f"[train] report -> s3://.../models/_train_report.json")
 
+
 def step_backtest(signals_from: str, proba_threshold: float, fee_rate: float):
+    """Run backtest and persist a normalized summary JSON for the UI/report."""
     _ensure_local_dir("features/", FEATURES_DIR.parent)
     _ensure_local_dir("datasets/", DATASETS_DIR.parent)
     _ensure_local_dir("models/", MODELS_DIR)
-    if not HAS_BT: raise SystemExit("backtest.runner not available")
-    summary = run_backtest(features_dir=str(FEATURES_DIR), datasets_dir=str(DATASETS_DIR), models_dir=str(MODELS_PAIRS_DIR),
-                           out_dir=str(BACKTEST_DIR), signals_from=signals_from, proba_threshold=proba_threshold, fee_rate=fee_rate)
+    if not HAS_BT:
+        raise SystemExit("backtest.runner not available")
+
+    # run the actual backtest
+    summary = run_backtest(
+        features_dir=str(FEATURES_DIR),
+        datasets_dir=str(DATASETS_DIR),
+        models_dir=str(MODELS_PAIRS_DIR),
+        out_dir=str(BACKTEST_DIR),
+        signals_from=signals_from,
+        proba_threshold=proba_threshold,
+        fee_rate=fee_rate,
+    )
+
+    # Normalize keys for UI stability
+    def _f(x, default=0.0):
+        try:
+            return float(x)
+        except Exception:
+            return float(default)
+
+    norm = {
+        "start": summary.get("start"),
+        "end": summary.get("end"),
+        "n_trades": int(summary.get("n_trades", 0) or 0),
+        "gross_return": _f(summary.get("gross_return", summary.get("return", 0.0)), 0.0),
+        "net_return": _f(summary.get("net_return", summary.get("net", summary.get("return", 0.0))), 0.0),
+        "max_dd": _f(summary.get("max_dd", summary.get("max_drawdown", 0.0)), 0.0),
+        "sharpe": _f(summary.get("sharpe", 0.0), 0.0),
+        "win_rate": _f(summary.get("win_rate", 0.0), 0.0),
+        "threshold": float(proba_threshold),
+        "signals_from": str(signals_from),
+        "pairs": summary.get("pairs", {}),
+    }
+
+    BACKTEST_DIR.mkdir(parents=True, exist_ok=True)
     summary_path = BACKTEST_DIR / "_summary.json"
-    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    summary_path.write_text(json.dumps(norm, indent=2), encoding="utf-8")
     _upload_dir(BACKTEST_DIR, "backtest/")
-    print(f"[backtest] summary -> s3://.../backtest/_summary.json")
+    print(f"[backtest] summary -> {summary_path}")
 
-def step_select(summary_path: str, registry_out: str, sharpe_min: float, maxdd_max: float, top_k: int,
-                require_oof: bool=False, min_auc: Optional[float]=None, min_rows: Optional[int]=None, max_per_symbol: Optional[int]=None):
-    _ensure_local_dir("backtest/", BACKTEST_DIR)
-    _ensure_local_file("models/_train_report.json", MODELS_DIR / "_train_report.json")
-    try:
-        from models.select import select_champions as _select
-        _select(summary_path=summary_path, registry_out=registry_out, sharpe_min=sharpe_min, maxdd_max=maxdd_max, top_k=top_k,
-                require_oof=require_oof, train_report_path=str(MODELS_DIR / "_train_report.json"),
-                min_auc=min_auc, min_rows=min_rows, max_per_symbol=max_per_symbol)
-    except Exception as e:
-        print(f"[select] fallback due to: {e}")
-        obj = json.loads(Path(summary_path).read_text(encoding="utf-8"))
-        pairs = obj.get("pairs", {})
-        rows = []
-        for pair, it in pairs.items():
-            met = (it or {}).get("metrics") or {}
-            try:
-                sharpe = float(met.get("sharpe"))
-                maxdd = float(met.get("maxdd"))
-            except Exception:
-                continue
-            if np.isnan(sharpe) or np.isnan(maxdd): continue
-            if sharpe >= float(sharpe_min) and maxdd <= float(maxdd_max):
-                rows.append((pair, sharpe, maxdd))
-        rows.sort(key=lambda t: t[1], reverse=True)
-        rows = rows[: int(top_k)]
-        reg = {"pairs": [{"pair": r[0], "rank": i+1, "metrics": {"sharpe": r[1], "maxdd": r[2]}} for i, r in enumerate(rows)]}
-        Path(registry_out).parent.mkdir(parents=True, exist_ok=True)
-        Path(registry_out).write_text(json.dumps(reg, indent=2), encoding="utf-8")
-    _upload_file(Path(registry_out), f"models/{Path(registry_out).name}")
-    print(f"[select] registry -> s3://.../models/{Path(registry_out).name}")
-
-def step_promote(registry_in: str, production_map_out: str):
-    _ensure_local_file(f"models/{Path(registry_in).name}", Path(registry_in))
-    p = Path(registry_in)
-    if not p.exists(): raise SystemExit(f"Registry not found: {p}")
-    obj = json.loads(p.read_text(encoding="utf-8"))
-    pairs = [it["pair"] for it in obj.get("pairs", [])]
-    prod = {"pairs": pairs}
-    out = Path(production_map_out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(prod, indent=2), encoding="utf-8")
-    _upload_file(out, f"models/{out.name}")
-    print(f"[promote] production map -> s3://.../models/{out.name}")
-
-def step_inference(registry_in: str, pairs_manifest: str, signals_from: str, proba_threshold: float,
-                   signals_out: Optional[str]=None, n_last: int=1, update: bool=True, skip_flat: bool=False):
-    _ensure_local_file(f"models/{Path(registry_in).name}", Path(registry_in))
-    _ensure_local_dir("features/", FEATURES_DIR.parent)
-    script = Path("inference.py")
-    if not script.exists(): raise SystemExit("inference.py not found.")
-    out_dir = Path(signals_out) if signals_out else SIGNALS_DIR
-    out_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [sys.executable, str(script), "--registry", str(registry_in),
-           "--pairs-manifest", str(pairs_manifest), "--signals-from", str(signals_from),
-           "--proba-threshold", str(proba_threshold), "--model-dir", str(MODELS_PAIRS_DIR),
-           "--n-last", str(int(n_last)), "--out", str(out_dir)]
-    if update: cmd.append("--update")
-    if skip_flat: cmd.append("--skip-flat")
-    print("[inference] running:", " ".join(cmd))
-    rc = subprocess.run(cmd).returncode
-    if rc != 0: raise SystemExit(f"inference.py failed with code {rc}")
-    _upload_dir(out_dir, "signals/")
-
-def step_aggregate(signals_dir: Optional[str], pairs_manifest: str, min_proba: float, top_k: int, out_dir: Optional[str]=None):
-    _ensure_local_dir("signals/", SIGNALS_DIR)
-    _ensure_local_dir("features/", FEATURES_DIR.parent)
-    script = Path("portfolio") / "aggregate_signals.py"
-    if not script.exists(): raise SystemExit("portfolio/aggregate_signals.py not found.")
-    sig_dir = Path(signals_dir) if signals_dir else SIGNALS_DIR
-    out_p = Path(out_dir) if out_dir else PORTFOLIO_DIR
-    out_p.mkdir(parents=True, exist_ok=True)
-    cmd = [sys.executable, str(script),
-           "--signals-dir", str(sig_dir),
-           "--pairs-manifest", str(pairs_manifest),
-           "--min-proba", str(min_proba),
-           "--top-k", str(int(top_k)),
-           "--out-dir", str(out_p)]
-    print("[aggregate] running:", " ".join(cmd))
-    rc = subprocess.run(cmd).returncode
-    if rc != 0: raise SystemExit(f"aggregate_signals.py failed with code {rc}")
-    _upload_dir(out_p, "portfolio/")
-
-def step_report(orders_json: Optional[str]=None, backtest_summary: Optional[str]=None, out_markdown: Optional[str]=None):
-    _ensure_local_dir("portfolio/", PORTFOLIO_DIR)  # optional inputs
-    _ensure_local_dir("backtest/", BACKTEST_DIR)
-    script = Path("portfolio") / "report_latest.py"
-    if not script.exists(): raise SystemExit("portfolio/report_latest.py not found.")
-    cmd = [sys.executable, str(script)]
-    if orders_json: cmd += ["--orders-json", str(orders_json)]
-    if backtest_summary: cmd += ["--backtest-summary", str(backtest_summary)]
-    if out_markdown: cmd += ["--out", str(out_markdown)]
-    print("[report] running:", " ".join(cmd))
-    rc = subprocess.run(cmd).returncode
-    if rc != 0: raise SystemExit(f"report_latest.py failed with code {rc}")
-    _upload_dir(PORTFOLIO_DIR, "portfolio/")
-
-# ---------------- CLI ----------------
-def build_argparser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(description="mntrading CLI")
-
-    ap.add_argument("--mode", required=True,
-                    choices=["screen","ingest","features","dataset","train","backtest","select","promote","inference","aggregate","report"])
-
-    # ingest config (large-universe options)
-    ap.add_argument("--symbols", type=str, help="CSV of symbols OR path/glob to screened_pairs_*.json (for features mode)")
-    ap.add_argument("--symbols-auto", action="store_true", help="Auto-build symbol universe (spot, quote=--quote) from --exchange using ccxt")
-    ap.add_argument("--exchange", type=str, default="binance", help="Exchange name for ccxt (default: binance)")
-    ap.add_argument("--quote", type=str, default="USDT", help="Quote currency for auto-universe (default: USDT)")
-    ap.add_argument("--top", type=int, default=200, help="Top-N symbols by 24h quote volume for auto-universe (default: 200)")
-    ap.add_argument("--max-candles", type=int, default=0, help="Optional per-symbol total cap (0=unbounded)")
-
-    # ingest common
-    ap.add_argument("--timeframe", type=str, default="5m")
-    ap.add_argument("--since-utc", type=str, default=None)
-    ap.add_argument("--limit", type=int, default=1000, help="Per-page limit (capped at 1000)")
-
-    # screen (auto 5m ingest control)
-    ap.add_argument("--since-utc-5m", type=str, default="2025-01-01T00:00:00Z")
-    ap.add_argument("--limit-5m", type=int, default=1000)
-
-    # features
-    ap.add_argument("--beta-window", type=int, default=300)
-    ap.add_argument("--z-window", type=int, default=300)
-
-    # dataset
-    ap.add_argument("--pairs-manifest", type=str, default=str(FEATURES_DIR / "_manifest.json"))
-    ap.add_argument("--label-type", type=str, default="z_threshold", choices=["z_threshold","revert_direction"])
-    ap.add_argument("--zscore-threshold", type=float, default=1.5)
-    ap.add_argument("--lag-features", type=int, default=1)
-    ap.add_argument("--horizon", type=int, default=0)
-    ap.add_argument("--out-dir", type=str, default=None)
-
-    # train/backtest
-    ap.add_argument("--use-dataset", action="store_true")
-    ap.add_argument("--n-splits", type=int, default=5)
-    ap.add_argument("--gap", type=int, default=24)
-    ap.add_argument("--max-train-size", type=int, default=0)
-    ap.add_argument("--early-stopping-rounds", type=int, default=50)
-    ap.add_argument("--proba-threshold", type=float, default=0.55)
-    ap.add_argument("--signals-from", type=str, default="auto", choices=["auto","model","z"])
-    ap.add_argument("--fee-rate", type=float, default=0.0005)
-
-    # selection/promote
-    ap.add_argument("--summary-path", type=str, default=str(BACKTEST_DIR / "_summary.json"))
-    ap.add_argument("--registry-out", type=str, default=str(MODELS_DIR / "registry.json"))
-    ap.add_argument("--sharpe-min", type=float, default=0.0)
-    ap.add_argument("--maxdd-max", type=float, default=1.0)
-    ap.add_argument("--top-k", type=int, default=20)
-    ap.add_argument("--production-map-out", type=str, default=str(MODELS_DIR / "production_map.json"))
-    ap.add_argument("--registry-in", type=str, default=str(MODELS_DIR / "registry.json"))
-
-    # inference / aggregate / report
-    ap.add_argument("--signals-dir", type=str, default=str(SIGNALS_DIR))
-    ap.add_argument("--portfolio-dir", type=str, default=str(PORTFOLIO_DIR))
-    ap.add_argument("--orders-json", type=str, default=str(PORTFOLIO_DIR / "latest_orders.json"))
-    ap.add_argument("--report-out", type=str, default=str(PORTFOLIO_DIR / "_latest_report.md"))
-    ap.add_argument("--n-last", type=int, default=1)
-    ap.add_argument("--update", action="store_true")
-    ap.add_argument("--skip-flat", action="store_true")
-    return ap
-
-def main():
-    ap = build_argparser()
-    args = ap.parse_args()
-
-    if args.mode == "ingest":
-        step_ingest(
-            symbols_arg=args.symbols,
-            timeframe=args.timeframe,
-            since_utc=args.since_utc,
-            limit=args.limit,
-            symbols_auto=bool(args.symbols_auto),
-            exchange=args.exchange,
-            quote=args.quote,
-            top=int(args.top),
-            max_candles=(int(args.max_candles) or None),
-        )
-    elif args.mode == "screen":
-        step_screen(args.symbols, args.since_utc_5m, args.limit_5m)
-    elif args.mode == "features":
-        step_features(args.symbols, args.beta_window, args.z_window)
-    elif args.mode == "dataset":
-        step_dataset(args.pairs_manifest, args.label_type, args.zscore_threshold, args.lag_features, args.horizon, args.out_dir)
-    elif args.mode == "train":
-        step_train(args.use_dataset, args.n_splits, args.gap, args.max_train_size, args.early_stopping_rounds, args.proba_threshold)
-    elif args.mode == "backtest":
-        step_backtest(args.signals_from, args.proba_threshold, args.fee_rate)
-    elif args.mode == "select":
-        step_select(args.summary_path, args.registry_out, args.sharpe_min, args.maxdd_max, args.top_k,
-                    require_oof=getattr(args, "require_oof", False),
-                    min_auc=getattr(args, "min_auc", None),
-                    min_rows=getattr(args, "min_rows", None),
-                    max_per_symbol=getattr(args, "max_per_symbol", None))
-    elif args.mode == "promote":
-        step_promote(args.registry_in, args.production_map_out)
-    elif args.mode == "inference":
-        step_inference(args.registry_in, str(FEATURES_DIR / "_manifest.json"),
-                       args.signals_from, args.proba_threshold,
-                       signals_out=args.signals_dir, n_last=args.n_last, update=bool(args.update), skip_flat=bool(args.skip_flat))
-    elif args.mode == "aggregate":
-        step_aggregate(args.signals_dir, str(FEATURES_DIR / "_manifest.json"), args.proba_threshold, args.top_k, args.portfolio_dir)
-    elif args.mode == "report":
-        step_report(args.orders_json, args.summary_path, args.report_out)
 
 if __name__ == "__main__":
     main()

@@ -1,28 +1,32 @@
-# docker-compose.streamlit.yml
-# All comments are in English by request.
-
 services:
   streamlit:
-    # Reuse the same image as the app service (adjust if your app uses another tag)
     image: ${APP_IMAGE:-mntrading-app}
     command: >
-      bash -lc "streamlit run $APP_PATH --server.address 0.0.0.0 --server.port 8501"
+      bash -lc "streamlit run ${APP_PATH:-ui/streamlit_app.py}
+      --server.address 0.0.0.0 --server.port 8501"
     environment:
-      - APP_PATH=ui/streamlit_app.py
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
-      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
-      - AWS_ACCESS_KEY_ID=admin
-      - AWS_SECRET_ACCESS_KEY=adminadmin
-      - AWS_DEFAULT_REGION=us-east-1
-      - MINIO_BUCKET=mlflow
-      - MINIO_PREFIX=mntrading/
+      APP_PATH: ${APP_PATH:-ui/streamlit_app.py}
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
+      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL:-http://minio:9000}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-admin}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-adminadmin}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      MINIO_BUCKET: ${MINIO_BUCKET:-mlflow}
     ports:
-      - "8501:8501"
+      - "${STREAMLIT_PORT:-8501}:8501"
     depends_on:
-      - app
-      - mlflow
-      - minio
+      app:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     volumes:
-      # Mount the project into the container if your app service does it as well.
-      # If your app already uses a volume for /app, mirror it here.
       - ./:/app:rw
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8501/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    profiles: ["ui"]

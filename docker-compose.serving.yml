@@ -1,0 +1,28 @@
+services:
+  serving:
+    image: mntrading-app
+    environment:
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
+      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL:-http://minio:9000}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-admin}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-adminadmin}
+      MODEL_NAME: ${MODEL_NAME:-mntrading_router}
+      MODEL_STAGE: ${MODEL_STAGE:-Production}
+      PORT: 5001
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command: >
+      bash -lc "chmod +x /app/scripts/serve_router.sh || true &&
+      /app/scripts/serve_router.sh"
+    ports:
+      - "5001:5001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5001/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    profiles: ["serving"]

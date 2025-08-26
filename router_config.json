@@ -1,0 +1,8 @@
+{
+  "proba_threshold": 0.55,
+  "uri_mapping": {
+    "ETH_USDT__SOL_USDT": "models:/mntrading_ETH_USDT__SOL_USDT/Production",
+    "BTC_USDT__SOL_USDT": "models:/mntrading_BTC_USDT__SOL_USDT/Production",
+    "BTC_USDT__ETH_USDT": "models:/mntrading_BTC_USDT__ETH_USDT/Production"
+  }
+}
