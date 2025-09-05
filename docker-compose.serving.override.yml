@@ -1,0 +1,13 @@
+services:
+  serving:
+    command: [ "bash","-lc","/app/scripts/serve_router.sh" ]
+    environment:
+      - MLFLOW_SCORING_SERVER_REQUEST_TIMEOUT=600
+    ports:
+      - "127.0.0.1:5005:5001"
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fsS http://127.0.0.1:5001/ping || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped

@@ -1,26 +1,20 @@
-# ui/streamlit_app.py
-# All comments are in English by request.
-
-import os
 import subprocess
 from pathlib import Path
-from datetime import datetime
-
 import streamlit as st
+import requests
 
 
 APP_ROOT = Path("/app")
 DATA = APP_ROOT / "data"
 
-# Helper to run shell commands inside the container.
+
 def run(cmd: str) -> str:
-    """Run a shell command and capture combined output."""
     proc = subprocess.run(
         ["bash", "-lc", cmd],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        cwd=str(APP_ROOT),
+        check=False,
     )
     return proc.stdout
 
@@ -65,6 +59,9 @@ def sidebar_params():
     proba_thr = st.sidebar.number_input("proba-threshold", min_value=0.5, max_value=1.0, value=0.55, step=0.01)
     top_k = st.sidebar.number_input("top-k", min_value=1, max_value=200, value=20, step=1)
 
+    st.sidebar.subheader("Serving")
+    serving_url = st.sidebar.text_input("Serving URL", "http://serving:5001")
+
     return dict(
         exchange=exchange, quote=quote, top=int(top),
         since_1h=since_1h, limit_1h=int(limit_1h), max_candles=int(max_candles),
@@ -73,28 +70,29 @@ def sidebar_params():
         label_type=label_type, z_thr=float(z_thr), lag_features=int(lag_features), horizon=int(horizon),
         n_splits=int(n_splits), gap=int(gap), early_stop=int(early_stop),
         proba_thr=float(proba_thr), top_k=int(top_k),
+        serving_url=serving_url,
     )
 
 
-def section_actions(p):
+def section_actions(p: dict):
     st.header("Actions")
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        if st.button("Ingest 1h (auto universe)"):
+        st.subheader("Data")
+        if st.button("Ingest(1h)"):
             cmd = (
-                "python /app/main.py --mode ingest --symbols-auto "
-                f"--exchange {p['exchange']} --quote {p['quote']} --top {p['top']} "
+                "python /app/main.py --mode ingest "
+                f"--symbols-auto --exchange {p['exchange']} --quote {p['quote']} --top {p['top']} "
                 f"--timeframe 1h --since-utc {p['since_1h']} --limit {p['limit_1h']} --max-candles {p['max_candles']}"
             )
             st.code(cmd)
             st.text(run(cmd))
 
-        if st.button("Screen + Ingest 5m for screened"):
+        if st.button("Screen pairs (and ingest 5m)"):
             cmd = (
-                "python /app/main.py --mode screen "
-                f"--since-utc-5m {p['since_5m']} --limit-5m {p['limit_5m']}"
+                "python /app/main.py --mode screen"
             )
             st.code(cmd)
             st.text(run(cmd))
@@ -102,7 +100,7 @@ def section_actions(p):
         if st.button("Features"):
             cmd = (
                 "python /app/main.py --mode features "
-                "--symbols '/app/data/pairs/screened_pairs_*.json' "
+                "--symbols $(ls -1t /app/data/pairs/screened_pairs_*.json | head -n1) "
                 f"--beta-window {p['beta_window']} --z-window {p['z_window']}"
             )
             st.code(cmd)
@@ -118,6 +116,7 @@ def section_actions(p):
             st.text(run(cmd))
 
     with col2:
+        st.subheader("Modeling")
         if st.button("Train"):
             cmd = (
                 "python /app/main.py --mode train --use-dataset "
@@ -156,12 +155,60 @@ def section_actions(p):
             st.text(run(cmd))
 
     with col3:
-        if st.button("Inference"):
+        st.subheader("MLflow & Serving")
+
+        hc_col1, hc_col2 = st.columns(2)
+        with hc_col1:
+            if st.button("Serving /ping"):
+                try:
+                    r = requests.get(f"{p['serving_url'].rstrip('/')}/ping", timeout=3)
+                    st.write(f"Status: {r.status_code}, Body: {r.text[:200]}")
+                except Exception as e:
+                    st.error(f"Serving ping failed: {e}")
+        with hc_col2:
+            if st.button("Serving /version"):
+                try:
+                    r = requests.get(f"{p['serving_url'].rstrip('/')}/version", timeout=3)
+                    st.write(f"Status: {r.status_code}, Body: {r.text[:200]}")
+                except Exception as e:
+                    st.error(f"Serving version failed: {e}")
+
+        st.divider()
+
+        if st.button("Register pairs to MLflow (→ Staging)"):
             cmd = (
-                "python /app/main.py --mode inference "
-                "--registry-in /app/data/models/registry.json "
-                f"--signals-from model --proba-threshold {p['proba_thr']} "
-                "--n-last 1 --update"
+                "python /app/scripts/register_models.py "
+                "--registry /app/data/models/registry.json "
+                "--models-dir /app/data/models/pairs "
+                "--experiment mntrading "
+                "--prefix mntrading "
+                "--stage Staging "
+                f"--top-k {p['top_k']}"
+            )
+            st.code(cmd)
+            st.text(run(cmd))
+
+        if st.button("Build & register Router from MLflow"):
+            cmd = (
+                "python /app/scripts/build_router_from_mlflow.py "
+                "--prefix mntrading_ "
+                "--pair-stage Staging "
+                f"--top-k {p['top_k']} "
+                "--registered-name mntrading_router "
+                "--router-stage Production "
+                "--experiment mntrading"
+            )
+            st.code(cmd)
+            st.text(run(cmd))
+            st.info("Now (on host) run:  docker compose -f docker-compose.yml -f docker-compose.streamlit.yml -f docker-compose.serving.yml up -d --force-recreate serving")
+
+        if st.button("Inference via MLflow Serving"):
+            cmd = (
+                "python /app/scripts/serving_inference.py "
+                "--pairs-manifest /app/data/features/pairs/_manifest.json "
+                f"--n-last 1 "
+                f"--serving-url {p['serving_url']} "
+                "--out /app/data/signals"
             )
             st.code(cmd)
             st.text(run(cmd))
@@ -181,6 +228,7 @@ def section_actions(p):
                 "python /app/portfolio/report_latest.py "
                 "--orders-json /app/data/portfolio/latest_orders.json "
                 "--backtest-summary /app/data/backtest_results/_summary.json "
+                "--registry /app/data/models/registry.json "
                 "--out /app/data/portfolio/_latest_report.md"
             )
             st.code(cmd)
@@ -203,36 +251,13 @@ def section_actions(p):
                 "--backtest-summary /app/data/backtest_results/_summary.json "
                 "--models-dir /app/data/models/pairs "
                 "--artifacts /app/data/portfolio/_latest_report.md "
-                "--artifacts /app/data/portfolio/latest_orders.json "
-                "--registry /app/data/models/registry.json "
-                "--prod-map /app/data/models/production_map.json"
+                "--artifacts /app/data/models/registry.json"
             )
             st.code(cmd)
             st.text(run(cmd))
 
-    st.subheader("Full pipeline (1-click)")
-    if st.button("Run FULL pipeline"):
-        with st.status("Running full pipeline...", expanded=True) as status:
-            steps = [
-                ("Ingest 1h", f"python /app/main.py --mode ingest --symbols-auto --exchange {p['exchange']} --quote {p['quote']} --top {p['top']} --timeframe 1h --since-utc {p['since_1h']} --limit {p['limit_1h']} --max-candles {p['max_candles']}"),
-                ("Screen+5m", f"python /app/main.py --mode screen --since-utc-5m {p['since_5m']} --limit-5m {p['limit_5m']}"),
-                ("Features", f"python /app/main.py --mode features --symbols '/app/data/pairs/screened_pairs_*.json' --beta-window {p['beta_window']} --z-window {p['z_window']}"),
-                ("Dataset", f"python /app/main.py --mode dataset --label-type {p['label_type']} --zscore-threshold {p['z_thr']} --lag-features {p['lag_features']} --horizon {p['horizon']}"),
-                ("Train", f"python /app/main.py --mode train --use-dataset --n-splits {p['n_splits']} --gap {p['gap']} --early-stopping-rounds {p['early_stop']} --proba-threshold {p['proba_thr']}"),
-                ("Backtest", f"python /app/main.py --mode backtest --signals-from auto --proba-threshold {p['proba_thr']} --fee-rate 0.0005"),
-                ("Select", f"python /app/main.py --mode select --summary-path /app/data/backtest_results/_summary.json --registry-out /app/data/models/registry.json --sharpe-min 0.0 --maxdd-max 1.0 --top-k {p['top_k']}"),
-                ("Promote", "python /app/main.py --mode promote --registry-in /app/data/models/registry.json --production-map-out /app/data/models/production_map.json"),
-                ("Inference", f"python /app/main.py --mode inference --registry-in /app/data/models/registry.json --signals-from model --proba-threshold {p['proba_thr']} --n-last 1 --update"),
-                ("Aggregate", f"python /app/main.py --mode aggregate --signals-dir /app/data/signals --portfolio-dir /app/data/portfolio --proba-threshold {p['proba_thr']} --top-k {p['top_k']}"),
-                ("Report", "python /app/portfolio/report_latest.py --orders-json /app/data/portfolio/latest_orders.json --backtest-summary /app/data/backtest_results/_summary.json --out /app/data/portfolio/_latest_report.md"),
-            ]
-            for name, cmd in steps:
-                st.write(f"**{name}** → `{cmd}`")
-                st.text(run(cmd))
-            status.update(label="Full pipeline finished", state="complete")
-
-    st.subheader("Artifacts")
-    report = DATA / "portfolio" / "_latest_report.md"
+    st.header("Latest report preview")
+    report = Path("/app/data/portfolio/_latest_report.md")
     if report.exists():
         st.markdown(report.read_text(encoding="utf-8"))
     else:

@@ -1,18 +1,8 @@
-# -*- coding: utf-8 -*-
-"""
-screen_pairs.py — screening cointegration/correlation pairs.
-
-Usage examples:
-  python screen_pairs.py --raw-parquet data/raw/ohlcv.parquet --symbols ALL --quote USDT --min-bars 150 --min-corr 0.10 --max-pvalue 1.0 --top-k 200
-  python screen_pairs.py --raw-parquet data/raw/ohlcv.parquet --symbols "BTC/USDT,ETH/USDT,SOL/USDT"
-"""
-
 from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
 from typing import List, Sequence, Optional, Tuple
-
 import numpy as np
 import pandas as pd
 
@@ -47,10 +37,8 @@ def _parse_symbols_arg(symbols_arg: Optional[str]) -> Optional[List[str]]:
 
 
 def _engle_granger_pvalue(y: pd.Series, x: pd.Series) -> float:
-    # Simple Engle–Granger cointegration test p-value
-    # (y and x should be aligned, same index)
     if not HAS_STATSMODELS:
-        return 1.0  # effectively "pass everything"
+        return 1.0
     try:
         res = smt.coint(y, x)
         return float(res[1])
@@ -86,7 +74,6 @@ def screen_pairs(
             c = float(corr.loc[a, b])
             if not np.isfinite(c) or c < min_corr:
                 continue
-            # (optional) cointegration
             pv = _engle_granger_pvalue(px[a].dropna(), px[b].dropna()) if HAS_STATSMODELS else 0.999
             if pv <= max_pvalue:
                 candidates.append((a, b, c, n, pv))

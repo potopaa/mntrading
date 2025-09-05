@@ -1,9 +1,3 @@
-# dags/mntrading_dataset_upload.py
-# -*- coding: utf-8 -*-
-"""
-Airflow DAG: build dataset then upload to MinIO.
-Run under Linux/WSL2. Airflow is not supported natively on Windows.
-"""
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.bash import BashOperator

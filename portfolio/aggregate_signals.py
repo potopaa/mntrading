@@ -1,29 +1,17 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# portfolio/aggregate_signals.py
-# All comments are in English by request.
-
 from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import click
 import pandas as pd
 
 
 def _canon_pair_key(s: str) -> str:
-    """Normalize pair key so that 'BNB/USDT__XRP/USDT' == 'BNB_USDT__XRP_USDT'."""
     return s.replace("/", "_").strip()
 
-
 def _read_manifest_pairs(manifest_path: Path) -> Dict[str, Path]:
-    """
-    Read features pairs manifest and return mapping:
-        canonical_pair_key -> features.parquet path
-    Supports 'items': [{"pair": "...", "path": "..."}] and friends.
-    """
     if not manifest_path.exists():
         raise FileNotFoundError(f"Pairs manifest not found: {manifest_path}")
     obj = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -36,20 +24,15 @@ def _read_manifest_pairs(manifest_path: Path) -> Dict[str, Path]:
             out[_canon_pair_key(str(pair))] = Path(str(path))
     return out
 
-
 @dataclass
 class SignalRow:
     ts: pd.Timestamp
     pair: str
-    side: int      # +1 long, -1 short
+    side: int
     proba: float
 
 
 def _read_signals(signals_dir: Path) -> List[SignalRow]:
-    """
-    Scan signals_dir/*/signals.parquet and build a list of SignalRow.
-    If 'pair' column is missing in a file, infer from folder name.
-    """
     rows: List[SignalRow] = []
     for p in signals_dir.rglob("signals.parquet"):
         try:
@@ -58,8 +41,7 @@ def _read_signals(signals_dir: Path) -> List[SignalRow]:
             if "pair" in df.columns:
                 pair = str(df["pair"].iloc[0])
             else:
-                pair = p.parent.name.replace("_", "/")  # reverse-guess
-            # ensure columns
+                pair = p.parent.name.replace("_", "/")
             tcol = "ts" if "ts" in df.columns else ("timestamp" if "timestamp" in df.columns else None)
             if not tcol:
                 continue
@@ -67,7 +49,6 @@ def _read_signals(signals_dir: Path) -> List[SignalRow]:
             pcol = "proba"
             if scol not in df.columns or pcol not in df.columns:
                 continue
-            # cast
             d = df[[tcol, scol, pcol]].copy()
             d.rename(columns={tcol: "ts"}, inplace=True)
             d["ts"] = pd.to_datetime(d["ts"], utc=True, errors="coerce")
@@ -75,36 +56,26 @@ def _read_signals(signals_dir: Path) -> List[SignalRow]:
             d["proba"] = pd.to_numeric(d["proba"], errors="coerce").fillna(0.0).astype("float64")
             d = d.dropna(subset=["ts"]).sort_values("ts")
 
-            # keep last row per file (usually one row if --n-last=1)
             if len(d):
                 r = d.iloc[-1]
                 rows.append(SignalRow(ts=r["ts"], pair=pair, side=int(r["side"]), proba=float(r["proba"])))
         except Exception:
-            # skip unreadable file
             pass
     return rows
 
 
 def _select_top(rows: List[SignalRow], min_proba: float, top_k: int) -> List[SignalRow]:
-    """
-    Deduplicate by pair keeping the most recent ts; filter by proba; take top_k by proba.
-    """
     latest: Dict[str, SignalRow] = {}
     for r in rows:
         key = _canon_pair_key(r.pair)
         if (key not in latest) or (r.ts > latest[key].ts):
             latest[key] = r
-    # filter and sort
     filt = [r for r in latest.values() if r.proba >= float(min_proba)]
     filt.sort(key=lambda x: x.proba, reverse=True)
     return filt[: max(top_k, 0)]
 
 
 def _write_orders(out_dir: Path, orders: List[SignalRow]) -> Tuple[Path, Dict]:
-    """
-    Write JSONL with orders and a summary latest_orders.json next to it.
-    Returns (path_to_jsonl, summary_obj).
-    """
     out_dir.mkdir(parents=True, exist_ok=True)
     ts_tag = pd.Timestamp.utcnow().strftime("%Y%m%dT%H%M%SZ")
     jsonl = out_dir / f"orders_{ts_tag}.jsonl"
@@ -136,7 +107,6 @@ def _write_orders(out_dir: Path, orders: List[SignalRow]) -> Tuple[Path, Dict]:
 @click.option("--top-k", type=int, default=20, show_default=True)
 @click.option("--out-dir", type=click.Path(path_type=Path), required=True, help="Where to write orders and summary")
 def main(signals_dir: Path, pairs_manifest: Path, min_proba: float, top_k: int, out_dir: Path):
-    """Aggregate signals into tradable orders with manifest-aware filtering."""
     feats = _read_manifest_pairs(pairs_manifest)
     rows = _read_signals(signals_dir)
 
@@ -145,7 +115,7 @@ def main(signals_dir: Path, pairs_manifest: Path, min_proba: float, top_k: int, 
 
     selected: List[SignalRow] = []
     skipped = 0
-    for r in _select_top(rows, min_proba=min_proba, top_k=top_k*3):  # pick more, will filter by manifest below
+    for r in _select_top(rows, min_proba=min_proba, top_k=top_k*3):
         k = _canon_pair_key(r.pair)
         if k not in feats:
             print(f"[skip] {r.pair}: features parquet not found in manifest")

@@ -1,9 +1,7 @@
-# backtest/runner.py
-# All comments are in English by request.
 
 from __future__ import annotations
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 import json
 import math
 
@@ -12,9 +10,6 @@ import pandas as pd
 
 
 def _read_features_manifest(features_dir: Path) -> List[Dict]:
-    """
-    Read features manifests from either features/_manifest.json or features/pairs/_manifest.json.
-    """
     candidates = [
         features_dir.parent / "_manifest.json",      # data/features/_manifest.json
         features_dir / "_manifest.json",             # data/features/pairs/_manifest.json
@@ -34,10 +29,6 @@ def _read_features_manifest(features_dir: Path) -> List[Dict]:
 
 
 def _ensure_schema(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normalize columns: require ts, z; optional: spread.
-    Convert ts to UTC tz-aware.
-    """
     # ts
     ts_col = None
     for c in ["ts", "timestamp", "time", "date", "datetime"]:
@@ -73,20 +64,6 @@ def _ensure_schema(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _compute_pair_pnl(df: pd.DataFrame, fee_rate: float, z_entry: float = 1.5, z_exit: float = 0.5) -> Dict[str, float]:
-    """
-    Very simple mean-reversion backtest on z-score:
-    - Enter SHORT spread when z > +z_entry (position = -1)
-    - Enter LONG  spread when z < -z_entry (position = +1)
-    - Exit to flat when |z| <= z_exit
-
-    PnL proxy:
-    - If 'spread' is available: ret = - pos_{t-1} * d(spread)
-      (mean-reversion: profit when spread reverts)
-    - Else: normalize via z-proxy: ret = - pos_{t-1} * d(z)
-
-    Transaction costs:
-    - approximate cost per position change by fee_rate * |Δpos| * 2  (two legs)
-    """
     df = df.copy()
     if "spread" in df.columns:
         serie = df["spread"].astype("float64")
@@ -142,21 +119,12 @@ def run_backtest(
     proba_threshold: float = 0.55,
     fee_rate: float = 0.0005,
 ) -> Dict:
-    """
-    Run a lightweight backtest compatible with CLI call in main.py.
-    This implementation ignores model predictions and evaluates a z-based mean-reversion strategy.
-    It writes a JSON summary into out_dir/_summary.json.
-
-    Parameters accepted but not used in this minimal version:
-      - signals_from, proba_threshold (kept for signature compatibility)
-    """
     fdir = Path(features_dir)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     items = _read_features_manifest(fdir if fdir.name == "pairs" else fdir / "pairs")
     if not items:
-        # try root 'features/_manifest.json'
         items = _read_features_manifest(fdir)
 
     if not items:
@@ -168,7 +136,6 @@ def run_backtest(
         pair = str(it["pair"])
         p = Path(it["path"])
         if not p.exists():
-            # try canonical local path
             guess = Path("data/features/pairs") / pair.replace("/", "_") / "features.parquet"
             if guess.exists():
                 p = guess
@@ -181,7 +148,6 @@ def run_backtest(
             pairs_metrics[pair] = {"metrics": met}
             processed += 1
         except Exception as e:
-            # skip problematic pair
             continue
 
     summary = {"pairs": pairs_metrics, "processed": processed}

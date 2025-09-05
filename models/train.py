@@ -1,13 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Training module expected by main.py:
- - exposes train_baseline(...) with signature that main.py calls
- - supports datasets (preferred) or features as source
- - per-pair OOF metrics + champion selection (AUC, tie-break by accuracy)
- - artifacts saved under data/models/pairs/<PAIR>/
- - MLflow logging with experiment created in S3 (MinIO) if needed
-"""
-
 from __future__ import annotations
 
 import os
@@ -15,7 +5,7 @@ import json
 import math
 import pickle
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -25,9 +15,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import TimeSeriesSplit
 
-# Optional LightGBM
+
 try:
     import lightgbm as lgb
     HAS_LGB = True
@@ -74,7 +63,6 @@ def _read_pair_features(path: Path) -> Optional[pd.DataFrame]:
 
 
 def _resolve_pair_file(source: str, pair: str) -> Optional[Path]:
-    # source == "dataset" or "features"
     if source == "dataset":
         p = Path("data/datasets/pairs") / f"{pair}.parquet"
         return p
@@ -84,14 +72,9 @@ def _resolve_pair_file(source: str, pair: str) -> Optional[Path]:
 
 
 def _iter_time_splits(n: int, n_splits: int, gap: int, max_train_size: int):
-    """
-    Custom CV for time series with optional max_train_size and gap before test.
-    Yields (train_idx, test_idx).
-    """
     if n_splits <= 1:
         yield np.arange(0, n - gap), np.arange(n - gap, n)
         return
-    # crude splitter similar to TimeSeriesSplit but with gap & max_train_size
     fold_size = (n - gap) // n_splits
     for i in range(n_splits):
         tr_end = (i + 1) * fold_size
@@ -154,19 +137,14 @@ def _mlflow_log_model_lightgbm(model, name: str):
 
 def _fit_eval_all(X: pd.DataFrame, y: pd.Series, n_splits: int, gap: int,
                   max_train_size: int, early_stopping_rounds: int):
-    """
-    Train 2–3 simple models + LightGBM (if available) and compute OOF metrics.
-    Returns dict: {'baseline': {...}, 'rf': {...}, 'lgbm': {...?}} with metrics + predictions.
-    """
+
     results = {}
 
-    # Baseline: logistic regression on standardized features
     pipe_lr = Pipeline([
         ("scaler", StandardScaler(with_mean=True, with_std=True)),
         ("lr", LogisticRegression(max_iter=200, solver="lbfgs"))
     ])
 
-    # Random Forest
     rf = RandomForestClassifier(
         n_estimators=200,
         max_depth=None,
@@ -175,7 +153,6 @@ def _fit_eval_all(X: pd.DataFrame, y: pd.Series, n_splits: int, gap: int,
         random_state=42,
     )
 
-    # Optional LGBM
     if HAS_LGB:
         lgbm = lgb.LGBMClassifier(
             n_estimators=400,
@@ -190,7 +167,6 @@ def _fit_eval_all(X: pd.DataFrame, y: pd.Series, n_splits: int, gap: int,
     else:
         lgbm = None
 
-    # OOF storage
     oof = {
         "baseline": np.full(len(y), np.nan, dtype=float),
         "rf": np.full(len(y), np.nan, dtype=float),
@@ -198,22 +174,17 @@ def _fit_eval_all(X: pd.DataFrame, y: pd.Series, n_splits: int, gap: int,
     if HAS_LGB:
         oof["lgbm"] = np.full(len(y), np.nan, dtype=float)
 
-    # CV
     for tr_idx, te_idx in _iter_time_splits(len(y), n_splits, gap, max_train_size):
         X_tr, y_tr = X.iloc[tr_idx], y.iloc[tr_idx]
         X_te, y_te = X.iloc[te_idx], y.iloc[te_idx]
 
-        # Baseline
         pipe_lr.fit(X_tr, y_tr)
         oof["baseline"][te_idx] = pipe_lr.predict_proba(X_te)[:, 1]
 
-        # RF
         rf.fit(X_tr, y_tr)
         oof["rf"][te_idx] = rf.predict_proba(X_te)[:, 1]
 
-        # LGB
         if HAS_LGB:
-            # keep it robust on small/flat data
             lgbm.fit(
                 X_tr, y_tr,
                 eval_set=[(X_te, y_te)],
@@ -225,7 +196,6 @@ def _fit_eval_all(X: pd.DataFrame, y: pd.Series, n_splits: int, gap: int,
             )
             oof["lgbm"][te_idx] = lgbm.predict_proba(X_te)[:, 1]
 
-    # Metrics
     out = {}
     for name, pred in oof.items():
         mask = ~np.isnan(pred)
@@ -245,9 +215,6 @@ def _fit_eval_all(X: pd.DataFrame, y: pd.Series, n_splits: int, gap: int,
 
 
 def _choose_champion(metrics_by_model: Dict[str, Dict[str, float]]) -> Tuple[str, Dict[str, float]]:
-    """
-    Choose best model by AUC; tie-break by accuracy.
-    """
     best = None
     best_name = ""
     for name, m in metrics_by_model.items():
@@ -271,16 +238,10 @@ def train_baseline(
     early_stopping_rounds: int,
     proba_threshold: float = 0.5,
 ) -> Dict:
-    """
-    Expected by main.py. Trains per-pair models and returns JSON-able report.
-    Artifacts saved under <out_dir>/pairs/<PAIR>/.
-    """
     _utf8_stdio()
 
-    # Source
     source = "dataset" if use_dataset else "features"
 
-    # Determine pair list from manifest produced by previous steps
     manifest_path = Path("data/features/pairs/_manifest.json")
     if manifest_path.exists():
         try:
@@ -293,7 +254,6 @@ def train_baseline(
     if not pairs:
         return {"pairs_trained": 0, "pairs_total": 0, "items": [], "reason": "no_pairs_found"}
 
-    # MLflow: optional but preferred
     try:
         import mlflow
         exp_id = _ensure_mlflow_experiment()
@@ -316,7 +276,6 @@ def train_baseline(
             results.append({"pair": pair, "skipped": True, "reason": "too_few_rows"})
             continue
 
-        # Expect columns: features... + 'y'
         if "y" not in df.columns:
             results.append({"pair": pair, "skipped": True, "reason": "no_y"})
             continue
@@ -326,7 +285,6 @@ def train_baseline(
         # sanity: keep only numeric columns
         X = X.select_dtypes(include=[np.number]).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-        # Train + OOF metrics
         metrics_by_model, baseline, rf, lgbm, oof = _fit_eval_all(
             X=X, y=y, n_splits=n_splits, gap=gap, max_train_size=max_train_size,
             early_stopping_rounds=early_stopping_rounds
@@ -334,18 +292,15 @@ def train_baseline(
 
         champion_name, champ_metrics = _choose_champion(metrics_by_model)
 
-        # Save artifacts under out_dir/pairs/<PAIR>/
         base_dir = Path(out_dir)
         pair_dir = base_dir / "pairs" / pair
         pair_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save champion model
         champ_path = pair_dir / f"model_{champion_name}.pkl"
         model_obj = {"baseline": baseline, "rf": rf, "lgbm": (lgbm if HAS_LGB else None)}.get(champion_name)
         with open(champ_path, "wb") as f:
             pickle.dump(model_obj, f)
 
-        # Save OOF predictions
         oof_path = pair_dir / "oof.parquet"
         pd.DataFrame(oof).to_parquet(oof_path, index=False)
 
@@ -360,14 +315,11 @@ def train_baseline(
         }
         (pair_dir / "__meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-        # MLflow logging (explicit experiment_id + run_id in logs)
         if mlflow_ok:
             try:
                 import mlflow
-                # end any previous active run (safety)
                 if mlflow.active_run():
                     mlflow.end_run()
-                # start run bound to our experiment id
                 with mlflow.start_run(run_name=pair, experiment_id=exp_id) as r:
                     print(f"[mlflow] run started pair={pair} run_id={r.info.run_id}")
                     mlflow.log_param("n_splits", n_splits)
@@ -384,7 +336,6 @@ def train_baseline(
                         0.0 if math.isnan(champ_metrics.get("auc", float("nan"))) else float(champ_metrics.get("auc", 0.0))
                     )
 
-                    # log models (best effort)
                     models_full = {"baseline": baseline, "rf": rf}
                     if HAS_LGB and (lgbm is not None):
                         models_full["lgbm"] = lgbm
@@ -402,7 +353,6 @@ def train_baseline(
             except Exception as e:
                 print(f"[mlflow] warning: {e!r}")
 
-        # Append report item
         results.append({
             "pair": pair,
             "champion": champion_name,
@@ -414,7 +364,6 @@ def train_baseline(
         "pairs_total": len(results),
         "items": results,
     }
-    # write global train report
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     (Path(out_dir) / "_train_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print("[train] report → data/models/_train_report.json")

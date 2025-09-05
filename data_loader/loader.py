@@ -1,5 +1,3 @@
-# data_loader/loader.py
-
 from __future__ import annotations
 from typing import Iterable, List, Optional
 import time
@@ -12,9 +10,6 @@ STABLES = {"USDT", "BUSD", "USDC", "TUSD", "FDUSD", "DAI"}
 
 
 def _ex_from_name(name: str):
-    """
-    Return a ccxt exchange instance by name, e.g. 'binance'.
-    """
     name = (name or "binance").lower()
     if not hasattr(ccxt, name):
         raise ValueError(f"Unknown exchange: {name}")
@@ -30,13 +25,6 @@ def list_spot_symbols(
     exclude_stables: bool = True,
     use_tickers_sort: bool = True,
 ) -> List[str]:
-    """
-    Build a large universe of spot symbols for given exchange and quote currency.
-    For Binance this returns e.g. ['BTC/USDT', 'ETH/USDT', ...].
-
-    - If use_tickers_sort=True, tries to sort by 24h quote volume via fetch_tickers.
-    - If fetch_tickers fails, falls back to alphabetical order.
-    """
     ex = _ex_from_name(exchange)
     quote = quote.upper().strip()
 

@@ -1,25 +1,4 @@
-﻿#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-mntrading CLI with robust ingest and remote-only storage.
-
-Highlights:
-- Auto-build a large universe of spot USDT symbols via --symbols-auto (no external loader required).
-- Paginated OHLCV ingest (1000 per request) until no progress or max_candles reached.
-- REMOTE_ONLY flow: read inputs from MinIO and write outputs there.
-
-ENV:
-  REMOTE_ONLY=1
-  MLFLOW_S3_ENDPOINT_URL=http://minio:9000
-  AWS_ACCESS_KEY_ID=admin
-  AWS_SECRET_ACCESS_KEY=adminadmin
-  AWS_DEFAULT_REGION=us-east-1
-  MINIO_BUCKET=mlflow
-  MINIO_PREFIX=mntrading/
-
-All comments are in English by request.
-"""
-from __future__ import annotations
+﻿from __future__ import annotations
 import argparse
 import glob
 import json
@@ -28,8 +7,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
+from typing import List, Optional, Tuple
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -49,7 +27,6 @@ def _remote_enabled() -> bool:
     return SINK is not None
 
 def _maybe_rm(path: Path) -> None:
-    """Delete local file/dir if REMOTE_ONLY."""
     if not REMOTE_ONLY:
         return
     if path.is_file():
@@ -61,38 +38,36 @@ def _maybe_rm(path: Path) -> None:
 
 def _upload_file(local: Path, key: str) -> None:
     if _remote_enabled() and local.exists():
-        try: SINK.upload_file(local, key)  # type: ignore[arg-type]
+        try: SINK.upload_file(local, key)
         except Exception: pass
         _maybe_rm(local)
 
 def _upload_dir(local_dir: Path, prefix: str) -> None:
     if _remote_enabled() and local_dir.exists():
-        try: SINK.upload_dir(local_dir, prefix)  # type: ignore[arg-type]
+        try: SINK.upload_dir(local_dir, prefix)
         except Exception: pass
         _maybe_rm(local_dir)
 
 def _ensure_local_file(key: str, local: Path) -> None:
-    """Fetch single object from MinIO if local missing."""
     if local.exists():
         return
     if not _remote_enabled():
         return
     try:
-        if SINK.exists(key):  # type: ignore[attr-defined]
+        if SINK.exists(key):
             local.parent.mkdir(parents=True, exist_ok=True)
-            SINK.download_file(key, local)  # type: ignore[arg-type]
+            SINK.download_file(key, local)
     except Exception:
         pass
 
 def _ensure_local_dir(prefix: str, local_dir: Path) -> None:
-    """Fetch all objects under prefix into local_dir if dir empty."""
     if local_dir.exists() and any(local_dir.rglob("*")):
         return
     if not _remote_enabled():
         return
     try:
         local_dir.mkdir(parents=True, exist_ok=True)
-        SINK.download_dir(prefix, local_dir)  # type: ignore[arg-type]
+        SINK.download_dir(prefix, local_dir)
     except Exception:
         pass
 
@@ -141,11 +116,9 @@ except Exception:
     run_backtest = None
     HAS_BT = False
 
-# ---------------- symbol universe (ccxt, no external loader) ----------------
 STABLES = {"USDT", "BUSD", "USDC", "TUSD", "FDUSD", "DAI"}
 
 def _ccxt_exchange(name: str):
-    """Return a ccxt exchange instance by name (e.g., 'binance')."""
     try:
         import ccxt  # type: ignore
     except Exception:
@@ -159,10 +132,6 @@ def _ccxt_exchange(name: str):
 
 def _list_spot_symbols_ccxt(exchange: str = "binance", quote: str = "USDT", top: int = 200,
                             exclude_stables: bool = True, use_tickers_sort: bool = True) -> List[str]:
-    """
-    Build a large universe of spot symbols with given quote from ccxt.
-    Sorted by 24h quote volume when possible.
-    """
     ex = _ccxt_exchange(exchange)
     quote = quote.upper().strip()
 
@@ -207,18 +176,11 @@ def _list_spot_symbols_ccxt(exchange: str = "binance", quote: str = "USDT", top:
         syms = syms[: int(top)]
     return syms
 
-# ---------------- ingest (paginated OHLCV) ----------------
+
 def _fetch_ohlcv_all_ccxt(ex, symbol: str, timeframe: str, since_ms: Optional[int],
                           per_page: int, max_candles: Optional[int]) -> pd.DataFrame:
-    """
-    Paginated OHLCV fetch:
-    - 1000 per page (Binance cap) or per_page provided
-    - continue while there is forward progress
-    - optional total cap per symbol via max_candles
-    """
     rows_all = []
     last_ts = None
-    # very high upper bound; loop breaks by progress/lack of rows
     for _ in range(100000):
         rows = ex.fetch_ohlcv(symbol, timeframe=timeframe, since=since_ms, limit=per_page)
         if not rows:
@@ -228,7 +190,6 @@ def _fetch_ohlcv_all_ccxt(ex, symbol: str, timeframe: str, since_ms: Optional[in
         rows_all.extend(rows)
         last_ts = rows[-1][0]
         since_ms = last_ts + 1
-        # respect rate limit
         rl = getattr(ex, "rateLimit", 500)
         time.sleep((rl or 500) / 1000.0)
         if max_candles and len(rows_all) >= max_candles:
@@ -316,11 +277,6 @@ def step_ingest(symbols_arg: Optional[str],
                 quote: str,
                 top: int,
                 max_candles: Optional[int]):
-    """
-    Ingest OHLCV for either:
-    - explicit CSV symbols via --symbols
-    - or auto universe via --symbols-auto/--exchange/--quote/--top
-    """
     symbols: List[str] = []
     if symbols_arg:
         sym_csv, _, _ = _parse_symbols_arg(symbols_arg)
@@ -372,7 +328,7 @@ def step_ingest(symbols_arg: Optional[str],
     print(f"[ingest] -> s3://.../raw/{out_file.name} (symbols: {len(meta['symbols'])}, rows: {meta['rows']})")
 
 def step_screen(symbols_arg: Optional[str], since_utc_5m: str, limit_5m: int):
-    # Ensure 1h parquet present locally
+
     _ensure_local_file("raw/ohlcv_1h.parquet", RAW_DIR / "ohlcv_1h.parquet")
     raw_1h = RAW_DIR / "ohlcv_1h.parquet"
     if not raw_1h.exists():
@@ -389,19 +345,18 @@ def step_screen(symbols_arg: Optional[str], since_utc_5m: str, limit_5m: int):
     if rc != 0:
         raise SystemExit(f"screen_pairs.py failed with code {rc}")
 
-    # Upload pairs artifacts and (if REMOTE_ONLY) clear local
     _upload_dir(PAIRS_DIR, "pairs/")
 
     js = sorted(PAIRS_DIR.glob("screened_pairs_*.json"), key=lambda p: p.stat().st_mtime)
     if not js:
         if _remote_enabled():
-            keys = [k for k in SINK.list_prefix("pairs/") if k.endswith(".json")]  # type: ignore[attr-defined]
+            keys = [k for k in SINK.list_prefix("pairs/") if k.endswith(".json")]
             keys.sort()
             if not keys:
                 raise SystemExit("screen produced no screened_pairs_*.json")
             last_key = keys[-1]
             tmp_json = PAIRS_DIR / "_last_screened_pairs.json"
-            SINK.download_file(last_key, tmp_json)  # type: ignore[arg-type]
+            SINK.download_file(last_key, tmp_json)
             pairs = _load_pairs_from_json(str(tmp_json))
             tmp_json.unlink(missing_ok=True)
         else:
@@ -414,7 +369,7 @@ def step_screen(symbols_arg: Optional[str], since_utc_5m: str, limit_5m: int):
     symbols = _pairs_to_symbol_union(pairs)
     print(f"[screen] selected pairs={len(pairs)} symbols={len(symbols)}")
 
-    # Auto-ingest 5m for selected symbols (paginated)
+    # Auto-ingest 5m for selected symbols
     step_ingest(
         symbols_arg=",".join(symbols),
         timeframe="5m",
@@ -457,7 +412,6 @@ def step_features(symbols_arg: str, beta_window: int, z_window: int):
                 df.to_parquet(pair_dir / "features.parquet", index=False)
                 produced.append(pk)
     else:
-        # Minimal fallback (should not be used if features/spread.py is present)
         piv = ohlcv.pivot(index="ts", columns="symbol", values="close").sort_index()
 
         def _rolling_beta_alpha(y: pd.Series, x: pd.Series, win: int):
@@ -557,35 +511,100 @@ def step_backtest(signals_from: str, proba_threshold: float, fee_rate: float):
     _upload_dir(BACKTEST_DIR, "backtest/")
     print(f"[backtest] summary -> s3://.../backtest/_summary.json")
 
-def step_select(summary_path: str, registry_out: str, sharpe_min: float, maxdd_max: float, top_k: int,
-                require_oof: bool=False, min_auc: Optional[float]=None, min_rows: Optional[int]=None, max_per_symbol: Optional[int]=None):
+def step_select(
+    summary_path: str,
+    registry_out: str,
+    sharpe_min: float,
+    maxdd_max: float,
+    top_k: int,
+    require_oof: bool = False,
+    min_auc: Optional[float] = None,
+    min_rows: Optional[int] = None,
+    max_per_symbol: Optional[int] = None,
+):
     _ensure_local_dir("backtest/", BACKTEST_DIR)
     _ensure_local_file("models/_train_report.json", MODELS_DIR / "_train_report.json")
+
+    used_fallback = False
+
     try:
         from models.select import select_champions as _select
-        _select(summary_path=summary_path, registry_out=registry_out, sharpe_min=sharpe_min, maxdd_max=maxdd_max, top_k=top_k,
-                require_oof=require_oof, train_report_path=str(MODELS_DIR / "_train_report.json"),
-                min_auc=min_auc, min_rows=min_rows, max_per_symbol=max_per_symbol)
+
+        _select(
+            summary_path=summary_path,
+            registry_out=registry_out,
+            sharpe_min=sharpe_min,
+            maxdd_max=maxdd_max,
+            top_k=top_k,
+            require_oof=require_oof,
+            train_report_path=str(MODELS_DIR / "_train_report.json"),
+            min_auc=min_auc,
+            min_rows=min_rows,
+            max_per_symbol=max_per_symbol,
+        )
+
+        try:
+            obj = json.loads(Path(registry_out).read_text(encoding="utf-8"))
+            pairs = obj.get("pairs") or []
+            if not isinstance(pairs, list) or len(pairs) == 0:
+                used_fallback = True
+        except Exception:
+            used_fallback = True
+
     except Exception as e:
-        print(f"[select] fallback due to: {e}")
+        print(f"[select] primary selector failed: {e}")
+        used_fallback = True
+
+    if used_fallback:
+        print("[select] using simple Sharpe/MaxDD fallback selector")
         obj = json.loads(Path(summary_path).read_text(encoding="utf-8"))
-        pairs = obj.get("pairs", {})
+
+        base = obj.get("pairs") or obj.get("items") or obj
+        if isinstance(base, dict):
+            iterable = base.items()
+        elif isinstance(base, list):
+            iterable = [
+                (
+                    (it.get("pair") or it.get("name") or it.get("key")),
+                    it,
+                )
+                for it in base
+            ]
+        else:
+            iterable = []
+
         rows = []
-        for pair, it in pairs.items():
+        for pair, it in iterable:
             met = (it or {}).get("metrics") or {}
             try:
                 sharpe = float(met.get("sharpe"))
                 maxdd = float(met.get("maxdd"))
             except Exception:
                 continue
-            if np.isnan(sharpe) or np.isnan(maxdd): continue
+            if np.isnan(sharpe) or np.isnan(maxdd):
+                continue
             if sharpe >= float(sharpe_min) and maxdd <= float(maxdd_max):
                 rows.append((pair, sharpe, maxdd))
+
         rows.sort(key=lambda t: t[1], reverse=True)
-        rows = rows[: int(top_k)]
-        reg = {"pairs": [{"pair": r[0], "rank": i+1, "metrics": {"sharpe": r[1], "maxdd": r[2]}} for i, r in enumerate(rows)]}
+        if isinstance(top_k, int) and top_k > 0:
+            rows = rows[: int(top_k)]
+
+        reg = {
+            "criteria": {
+                "source": "backtest",
+                "sharpe_min": float(sharpe_min),
+                "maxdd_max": float(maxdd_max),
+                "top_k": len(rows),
+            },
+            "pairs": [
+                {"pair": r[0], "rank": i + 1, "metrics": {"sharpe": r[1], "maxdd": r[2]}}
+                for i, r in enumerate(rows)
+            ],
+        }
         Path(registry_out).parent.mkdir(parents=True, exist_ok=True)
         Path(registry_out).write_text(json.dumps(reg, indent=2), encoding="utf-8")
+
     _upload_file(Path(registry_out), f"models/{Path(registry_out).name}")
     print(f"[select] registry -> s3://.../models/{Path(registry_out).name}")
 

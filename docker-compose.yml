@@ -57,7 +57,6 @@ services:
     volumes:
       - ./mlflow:/app/mlflow
 
-  # NEW: FastAPI server (см. api/server.py)
   api:
     build: .
     container_name: mntrading-api
@@ -117,3 +116,22 @@ services:
       - app
       - mlflow
       - minio
+
+  serving:
+    image: mntrading-app
+    depends_on:
+      - mlflow
+      - minio
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-admin}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-adminadmin}
+    command: >
+      bash -lc "mlflow models serve
+      --model-uri models:/mntrading_router/Production
+      --host 0.0.0.0 --port 5001 --env-manager local"
+    ports:
+      - "5001:5001"
+    networks:
+      - default

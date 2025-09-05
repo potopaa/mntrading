@@ -1,16 +1,8 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# inference.py
-# All comments are in English by request.
-
 from __future__ import annotations
 import json
-import math
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
 import click
 import numpy as np
 import pandas as pd
@@ -31,14 +23,9 @@ def _load_json(path: Path) -> dict:
 
 
 def _find_model_for_pair(models_dir: Path, pair: str) -> Optional[Path]:
-    """
-    Heuristically pick the latest model artifact under models_dir/pairs/<pair_key>.
-    Accept common extensions: .pkl, .joblib, .json
-    """
     key = pair.replace("/", "_")
     root = models_dir / key
     if not root.exists():
-        # try nested pairs dir if models_dir is data/models
         alt = models_dir / "pairs" / key
         if alt.exists():
             root = alt
@@ -54,13 +41,7 @@ def _find_model_for_pair(models_dir: Path, pair: str) -> Optional[Path]:
 
 
 def _parse_registry(path: Optional[Path], models_dir: Path) -> List[RegistryItem]:
-    """
-    Accept several formats:
-      A) {"pairs": [{"pair": "A__B", "model_path": "..."}]}
-      B) {"pairs": [{"pair": "A__B", "rank": 1, "metrics": {...}}, ...]}  (fallback select)
-      C) {"pairs": ["A__B", "C__D", ...]}
-    If no registry provided, return empty list.
-    """
+
     out: List[RegistryItem] = []
     if path is None:
         return out
@@ -81,7 +62,6 @@ def _parse_registry(path: Optional[Path], models_dir: Path) -> List[RegistryItem
     if not out:
         raise ValueError(f"Unsupported or empty registry format: {path}")
 
-    # resolve missing model paths
     resolved: List[RegistryItem] = []
     for ri in out:
         if ri.model_path and ri.model_path.exists():
@@ -95,9 +75,6 @@ def _parse_registry(path: Optional[Path], models_dir: Path) -> List[RegistryItem
 # ---------- utils: features manifest ----------
 
 def _read_features_manifest(manifest_path: Path) -> Dict[str, Path]:
-    """
-    Returns mapping pair_key -> features parquet path.
-    """
     if not manifest_path.exists():
         raise FileNotFoundError(f"Pairs manifest not found: {manifest_path}")
     obj = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -112,7 +89,6 @@ def _read_features_manifest(manifest_path: Path) -> Dict[str, Path]:
 
 
 def _ensure_schema(df: pd.DataFrame) -> pd.DataFrame:
-    # ts
     tcol = None
     for c in ("ts", "timestamp", "time", "date", "datetime"):
         if c in df.columns:
@@ -123,7 +99,6 @@ def _ensure_schema(df: pd.DataFrame) -> pd.DataFrame:
         df = df.rename(columns={tcol: "ts"})
     df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
 
-    # z
     zc = None
     for c in ("z", "zscore", "z_score", "spread_z"):
         if c in df.columns:
@@ -144,13 +119,6 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-x))
 
 def _z_based_signals(df: pd.DataFrame, thr: float) -> pd.DataFrame:
-    """
-    Produce simple mean-reversion signals from z-score:
-      side = +1 when z <= -thr
-      side = -1 when z >= +thr
-      proba ~ sigmoid(|z|-thr)
-    Keep only bars where |z| >= thr (event).
-    """
     z = df["z"].values
     side = np.where(z <= -thr, 1, np.where(z >= thr, -1, 0))
     proba = _sigmoid(np.abs(z) - float(thr))
@@ -159,16 +127,9 @@ def _z_based_signals(df: pd.DataFrame, thr: float) -> pd.DataFrame:
     out["proba"] = proba[np.abs(z) >= float(thr)]
     return out
 
-# Placeholder for model-based inference (not loading any specific framework here).
 def _model_based_signals(df: pd.DataFrame, model_path: Path, thr: float) -> pd.DataFrame:
-    """
-    Minimal placeholder: until real model loader is wired,
-    fallback to z-based signals even in 'model' mode if model_path is missing.
-    """
     if not model_path or not model_path.exists():
         return _z_based_signals(df, thr)
-    # Here you could branch on extension and load joblib/pickle/xgb etc.
-    # For now, mimic z-based output to keep the pipeline running.
     return _z_based_signals(df, thr)
 
 
@@ -199,7 +160,6 @@ def main(registry_path: Optional[Path],
          out_dir: Path,
          update: bool,
          skip_flat: bool):
-    # load pairs list
     feats = _read_features_manifest(pairs_manifest)
     pairs_in_manifest = list(feats.keys())
 
@@ -208,15 +168,12 @@ def main(registry_path: Optional[Path],
         try:
             registry_items = _parse_registry(registry_path, model_dir)
         except Exception as e:
-            # Log and proceed without failing hard
             print(f"[inference] registry parse failed ({e}); falling back to manifest pairs")
     if not registry_items:
         registry_items = [RegistryItem(pair=p) for p in pairs_in_manifest]
 
-    # decide mode
     mode = signals_from
     if mode == "auto":
-        # prefer model if at least one model path is resolved
         if any(ri.model_path for ri in registry_items):
             mode = "model"
         else:
@@ -229,7 +186,6 @@ def main(registry_path: Optional[Path],
         pair = ri.pair
         p = feats.get(pair)
         if p is None or not p.exists():
-            # try canonical path
             guess = Path("data/features/pairs") / pair.replace("/", "_") / "features.parquet"
             if guess.exists():
                 p = guess

@@ -1,9 +1,5 @@
-# docker-compose.streamlit.yml
-# All comments are in English by request.
-
 services:
   streamlit:
-    # Reuse the same image as the app service (adjust if your app uses another tag)
     image: ${APP_IMAGE:-mntrading-app}
     command: >
       bash -lc "streamlit run $APP_PATH --server.address 0.0.0.0 --server.port 8501"
@@ -23,6 +19,4 @@ services:
       - mlflow
       - minio
     volumes:
-      # Mount the project into the container if your app service does it as well.
-      # If your app already uses a volume for /app, mirror it here.
       - ./:/app:rw

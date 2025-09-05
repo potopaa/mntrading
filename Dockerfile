@@ -12,7 +12,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# sys deps (lightgbm runtime, git, TLS)
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     curl \
@@ -20,13 +20,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
  && rm -rf /var/lib/apt/lists/*
 
-# deps layer
+
 COPY requirements.txt /app/requirements.txt
 RUN python -m pip install --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt
 
-# project
+
 COPY . /app
 
-# run command set in docker-compose (container stays alive)
+
 CMD ["bash", "-lc", "tail -f /dev/null"]

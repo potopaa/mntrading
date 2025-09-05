@@ -1,6 +1,3 @@
-# dags/mntrading_full_pipeline.py
-# All comments are in English by request.
-
 from __future__ import annotations
 from datetime import datetime, timedelta
 import os
@@ -8,8 +5,6 @@ import os
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 
-# NOTE: Airflow on Windows is not supported; run this DAG in Linux/containers.
-# This DAG assumes the 'app' service has the project at /app.
 
 default_args = {
     "owner": "mntrading",
@@ -29,7 +24,7 @@ PROBA = os.getenv("MNTR_PROBA", "0.55")
 with DAG(
     dag_id="mntrading_full_pipeline",
     start_date=datetime(2025, 1, 1),
-    schedule_interval=None,   # trigger manually, or set a cron
+    schedule_interval=None,
     catchup=False,
     default_args=default_args,
     tags=["mntrading"],

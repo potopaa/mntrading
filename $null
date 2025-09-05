@@ -1,0 +1,2 @@
+ mntrading-serving copy scripts/serve_router.sh to mntrading-serving:/app/scripts/serve_router.sh Copying
+ mntrading-serving copy scripts/serve_router.sh to mntrading-serving:/app/scripts/serve_router.sh Copied

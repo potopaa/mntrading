@@ -1,6 +1,3 @@
-# features/labels.py
-# All comments are in English by request.
-
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional
@@ -8,7 +5,6 @@ import json
 import os
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 from pandas.api.types import is_datetime64_any_dtype, is_datetime64tz_dtype
 
@@ -16,7 +12,7 @@ from pandas.api.types import is_datetime64_any_dtype, is_datetime64tz_dtype
 
 @dataclass
 class DatasetBuildConfig:
-    label_type: str = "z_threshold"   # "z_threshold" | "revert_direction"
+    label_type: str = "z_threshold"   # "z_threshold" / "revert_direction"
     zscore_threshold: float = 1.5
     lag_features: int = 10
     horizon: int = 3
@@ -154,7 +150,7 @@ def _build_single_pair_dataset(pair: str, feat_path: Path, cfg: DatasetBuildConf
 
     if cfg.label_type == "z_threshold":
         y = _target_z_threshold(df, cfg.horizon, cfg.zscore_threshold)
-        rows = (df["z"].abs() >= float(cfg.zscore_threshold))  # keep only event rows
+        rows = (df["z"].abs() >= float(cfg.zscore_threshold))
     elif cfg.label_type == "revert_direction":
         y = _target_revert_direction(df, cfg.horizon)
         rows = pd.Series(True, index=df.index)

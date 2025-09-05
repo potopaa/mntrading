@@ -1,6 +1,3 @@
-# scripts/build_registry.py
-# All comments are in English by request.
-
 from __future__ import annotations
 import argparse
 import json
@@ -8,10 +5,6 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
 def _collect_candidates(summary: dict) -> List[Tuple[str, float, dict]]:
-    """
-    Extract (pair, sharpe, metrics) from summary.
-    Supports summary['pairs'] as dict or list of dicts.
-    """
     items: List[Tuple[str, float, dict]] = []
     pairs_obj = summary.get("pairs")
 
@@ -32,16 +25,11 @@ def _collect_candidates(summary: dict) -> List[Tuple[str, float, dict]]:
                 items.append((str(pair), sh, met))
 
     else:
-        # unknown format -> empty
         pass
 
     return items
 
 def _find_model(models_dir: Path, pair: str) -> Optional[Path]:
-    """
-    Find latest model artifact for given pair under models_dir[/pairs]/<pair_key>.
-    Accept extensions: .pkl, .joblib, .json
-    """
     key = pair.replace("/", "_")
     roots = [models_dir / key, models_dir / "pairs" / key]
     root = next((r for r in roots if r.exists()), None)
@@ -68,7 +56,6 @@ def main():
     if not items:
         raise RuntimeError("No pairs found in summary or unsupported summary format")
 
-    # sort by sharpe descending and take top-k
     items.sort(key=lambda x: x[1], reverse=True)
     items = items[: max(args.top_k, 1)]
 

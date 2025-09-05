@@ -1,8 +1,6 @@
-# api/server.py
-# -*- coding: utf-8 -*-
 """
 FastAPI service to expose health and simple pipeline triggers.
-All comments in English.
+
 """
 from fastapi import FastAPI
 from pydantic import BaseModel

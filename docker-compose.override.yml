@@ -1,8 +1,4 @@
-# docker-compose.override.yml
-# All comments are in English by request.
-
 services:
-  # Streamlit UI service (valid definition so Compose stops failing validation)
   streamlit:
     build:
       context: .
@@ -26,5 +22,4 @@ services:
       - minio
     volumes:
       - ./:/app:rw
-    # Optional: do not start unless explicitly targeted
     profiles: ["ui"]

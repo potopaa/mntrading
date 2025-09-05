@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+
+export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-http://mlflow:5000}"
+export MLFLOW_S3_ENDPOINT_URL="${MLFLOW_S3_ENDPOINT_URL:-http://minio:9000}"
+export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-admin}"
+export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-adminadmin}"
+export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+
+MODEL_URI="${MODEL_URI:-models:/mntrading_router/Production}"
+HOST="${HOST:-0.0.0.0}"
+PORT="${PORT:-5001}"
+WORKERS="${WORKERS:-1}"
+
+
+export MLFLOW_SCORING_SERVER_REQUEST_TIMEOUT="${MLFLOW_SCORING_SERVER_REQUEST_TIMEOUT:-600}"
+
+echo "[serve_router] MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI}"
+echo "[serve_router] MODEL_URI=${MODEL_URI}"
+echo "[serve_router] PORT=${PORT}, WORKERS=${WORKERS}, REQ_TIMEOUT=${MLFLOW_SCORING_SERVER_REQUEST_TIMEOUT}"
+
+
+for i in $(seq 1 60); do
+  if curl -fsS "${MLFLOW_TRACKING_URI}/api/2.0/mlflow/experiments/list" >/dev/null; then
+    echo "[serve_router] MLflow is reachable"
+    break
+  fi
+  echo "[serve_router] waiting for MLflow... (${i}/60)"
+  sleep 2
+done
+
+
+python - <<'PY'
+import os, sys
+from mlflow.tracking import MlflowClient
+uri = os.environ.get("MODEL_URI","models:/mntrading_router/Production")
+if uri.startswith("models:/"):
+    name = uri.split("models:/",1)[1].split("/",1)[0]
+    c = MlflowClient()
+    try:
+        c.get_registered_model(name)
+        print("[serve_router] MODEL_OK:", name)
+    except Exception as e:
+        print("[serve_router] MODEL_MISSING:", name, e)
+PY
+
+
+exec mlflow models serve \
+  -m "${MODEL_URI}" \
+  --env-manager local \
+  --host "${HOST}" \
+  --port "${PORT}" \
+  --workers "${WORKERS}"

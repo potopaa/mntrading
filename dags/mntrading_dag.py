@@ -1,9 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Airflow DAGs for mntrading:
-- mntrading_bootstrap_daily: once a day, run full bootstrap_quick via API and wait until finished
-- mntrading_short_cycle_15m: every 15m, run short_cycle via API (ingest -> features -> inference -> aggregate -> report)
-"""
 from __future__ import annotations
 
 import os
@@ -34,7 +28,6 @@ def trigger_bootstrap_quick(**context):
 
 
 def trigger_short_cycle(**context):
-    # можно параметризовать по контексту, если нужно
     payload = {
         "timeframe": "5m",
         "limit": 1000,
@@ -61,7 +54,7 @@ def wait_until_finished(max_minutes: int = 120, **context):
                 print("status:", status)
                 last_status = status
             if status in ("finished", "error"):
-                # лог в stdout
+
                 print(js.get("logs", "")[-6000:])
                 if status == "error":
                     raise RuntimeError("Pipeline finished with ERROR")

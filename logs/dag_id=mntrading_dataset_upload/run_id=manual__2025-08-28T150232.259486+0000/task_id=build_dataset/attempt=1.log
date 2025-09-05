@@ -1,0 +1,23 @@
+[2025-08-28T15:04:47.349+0000] {local_task_job_runner.py:120} INFO - ::group::Pre task execution logs
+[2025-08-28T15:06:00.171+0000] {taskinstance.py:2076} INFO - Dependencies all met for dep_context=non-requeueable deps ti=<TaskInstance: mntrading_dataset_upload.build_dataset manual__2025-08-28T15:02:32.259486+00:00 [queued]>
+[2025-08-28T15:06:00.950+0000] {taskinstance.py:2076} INFO - Dependencies all met for dep_context=requeueable deps ti=<TaskInstance: mntrading_dataset_upload.build_dataset manual__2025-08-28T15:02:32.259486+00:00 [queued]>
+[2025-08-28T15:06:00.967+0000] {taskinstance.py:2306} INFO - Starting attempt 1 of 2
+[2025-08-28T15:06:02.396+0000] {taskinstance.py:2330} INFO - Executing <Task(BashOperator): build_dataset> on 2025-08-28 15:02:32.259486+00:00
+[2025-08-28T15:06:02.674+0000] {standard_task_runner.py:90} INFO - Running: ['***', 'tasks', 'run', 'mntrading_dataset_upload', 'build_dataset', 'manual__2025-08-28T15:02:32.259486+00:00', '--job-id', '4', '--raw', '--subdir', 'DAGS_FOLDER/mntrading_dataset_upload.py', '--cfg-path', '/tmp/tmpavcv8dg6']
+[2025-08-28T15:06:02.681+0000] {standard_task_runner.py:91} INFO - Job 4: Subtask build_dataset
+[2025-08-28T15:06:02.910+0000] {logging_mixin.py:188} WARNING - /home/***/.local/lib/python3.12/site-packages/***/task/task_runner/standard_task_runner.py:61 DeprecationWarning: This process (pid=9230) is multi-threaded, use of fork() may lead to deadlocks in the child.
+[2025-08-28T15:06:02.911+0000] {standard_task_runner.py:63} INFO - Started process 9287 to run task
+[2025-08-28T15:06:09.796+0000] {task_command.py:426} INFO - Running <TaskInstance: mntrading_dataset_upload.build_dataset manual__2025-08-28T15:02:32.259486+00:00 [running]> on host 53739701ccad
+[2025-08-28T15:06:16.890+0000] {taskinstance.py:2648} INFO - Exporting env vars: AIRFLOW_CTX_DAG_OWNER='***' AIRFLOW_CTX_DAG_ID='mntrading_dataset_upload' AIRFLOW_CTX_TASK_ID='build_dataset' AIRFLOW_CTX_EXECUTION_DATE='2025-08-28T15:02:32.259486+00:00' AIRFLOW_CTX_TRY_NUMBER='1' AIRFLOW_CTX_DAG_RUN_ID='manual__2025-08-28T15:02:32.259486+00:00'
+[2025-08-28T15:06:17.045+0000] {taskinstance.py:430} INFO - ::endgroup::
+[2025-08-28T15:06:24.307+0000] {subprocess.py:63} INFO - Tmp dir root location: /tmp
+[2025-08-28T15:06:24.379+0000] {subprocess.py:75} INFO - Running command: ['/usr/bin/bash', '-c', 'python /app/main.py --mode dataset --label-type z_threshold --zscore-threshold 1.5 --lag-features 10 --horizon 3']
+[2025-08-28T15:06:24.612+0000] {subprocess.py:86} INFO - Output:
+[2025-08-28T15:36:29.555+0000] {subprocess.py:93} INFO - [dataset] using manifest: data/features/pairs/_manifest.json
+[2025-08-28T15:36:33.585+0000] {subprocess.py:93} INFO - [dataset] built 200 datasets -> data/datasets/pairs
+[2025-08-28T15:38:14.333+0000] {subprocess.py:97} INFO - Command exited with return code 0
+[2025-08-28T15:38:17.009+0000] {taskinstance.py:441} INFO - ::group::Post task execution logs
+[2025-08-28T15:38:36.832+0000] {taskinstance.py:1206} INFO - Marking task as SUCCESS. dag_id=mntrading_dataset_upload, task_id=build_dataset, run_id=manual__2025-08-28T15:02:32.259486+00:00, execution_date=20250828T150232, start_date=20250828T150600, end_date=20250828T153836
+[2025-08-28T15:38:43.095+0000] {local_task_job_runner.py:240} INFO - Task exited with return code 0
+[2025-08-28T15:38:53.223+0000] {taskinstance.py:3503} INFO - 0 downstream tasks scheduled from follow-on schedule check
+[2025-08-28T15:38:53.226+0000] {local_task_job_runner.py:222} INFO - ::endgroup::
