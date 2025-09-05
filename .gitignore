@@ -15,6 +15,7 @@ data/*
 mlruns/*
 !mlruns/.gitkeep
 mlflow.db
+logs/*
 
 # Ignore heavy formats only under data/**
 data/**/*.parquet
