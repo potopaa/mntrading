@@ -9434,3 +9434,17 @@
 [2025-09-05T11:34:00.919+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:34:00.918+0000] {dag.py:3096} INFO - Sync 1 DAGs
 [2025-09-05T11:34:00.984+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:34:00.984+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_e2e to 2025-09-04 00:00:00+00:00, run_after=2025-09-05 00:00:00+00:00
 [2025-09-05T11:34:01.027+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_pipeline.py took 0.495 seconds
+[2025-09-05T11:34:31.370+0000] {processor.py:161} INFO - Started process (PID=50910) to work on /opt/airflow/dags/mntrading_pipeline.py
+[2025-09-05T11:34:31.381+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_pipeline.py for tasks to queue
+[2025-09-05T11:34:31.383+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:34:31.382+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_pipeline.py
+[2025-09-05T11:34:31.798+0000] {processor.py:840} INFO - DAG(s) 'mntrading_e2e' retrieved from /opt/airflow/dags/mntrading_pipeline.py
+[2025-09-05T11:34:31.979+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:34:31.969+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:34:32.118+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:34:32.118+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_e2e to 2025-09-04 00:00:00+00:00, run_after=2025-09-05 00:00:00+00:00
+[2025-09-05T11:34:32.214+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_pipeline.py took 0.873 seconds
+[2025-09-05T11:35:03.049+0000] {processor.py:161} INFO - Started process (PID=50930) to work on /opt/airflow/dags/mntrading_pipeline.py
+[2025-09-05T11:35:03.052+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_pipeline.py for tasks to queue
+[2025-09-05T11:35:03.062+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:35:03.061+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_pipeline.py
+[2025-09-05T11:35:03.366+0000] {processor.py:840} INFO - DAG(s) 'mntrading_e2e' retrieved from /opt/airflow/dags/mntrading_pipeline.py
+[2025-09-05T11:35:03.474+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:35:03.473+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:35:03.545+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:35:03.545+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_e2e to 2025-09-04 00:00:00+00:00, run_after=2025-09-05 00:00:00+00:00
+[2025-09-05T11:35:03.597+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_pipeline.py took 0.574 seconds

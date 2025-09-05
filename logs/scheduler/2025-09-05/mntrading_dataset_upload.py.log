@@ -9455,3 +9455,17 @@
 [2025-09-05T11:34:15.458+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:34:15.457+0000] {dag.py:3096} INFO - Sync 1 DAGs
 [2025-09-05T11:34:15.517+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:34:15.517+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_dataset_upload to None, run_after=None
 [2025-09-05T11:34:15.729+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_dataset_upload.py took 0.720 seconds
+[2025-09-05T11:34:46.730+0000] {processor.py:161} INFO - Started process (PID=50920) to work on /opt/airflow/dags/mntrading_dataset_upload.py
+[2025-09-05T11:34:46.732+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_dataset_upload.py for tasks to queue
+[2025-09-05T11:34:46.744+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:34:46.743+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_dataset_upload.py
+[2025-09-05T11:34:46.833+0000] {processor.py:840} INFO - DAG(s) 'mntrading_dataset_upload' retrieved from /opt/airflow/dags/mntrading_dataset_upload.py
+[2025-09-05T11:34:47.002+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:34:47.001+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:34:47.075+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:34:47.075+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_dataset_upload to None, run_after=None
+[2025-09-05T11:34:47.213+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_dataset_upload.py took 0.519 seconds
+[2025-09-05T11:35:18.332+0000] {processor.py:161} INFO - Started process (PID=50940) to work on /opt/airflow/dags/mntrading_dataset_upload.py
+[2025-09-05T11:35:18.340+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_dataset_upload.py for tasks to queue
+[2025-09-05T11:35:18.343+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:35:18.342+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_dataset_upload.py
+[2025-09-05T11:35:18.408+0000] {processor.py:840} INFO - DAG(s) 'mntrading_dataset_upload' retrieved from /opt/airflow/dags/mntrading_dataset_upload.py
+[2025-09-05T11:35:18.627+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:35:18.627+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:35:18.714+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:35:18.713+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_dataset_upload to None, run_after=None
+[2025-09-05T11:35:18.792+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_dataset_upload.py took 0.504 seconds

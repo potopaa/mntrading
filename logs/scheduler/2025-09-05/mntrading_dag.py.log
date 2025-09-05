@@ -10806,3 +10806,19 @@
 [2025-09-05T11:34:00.882+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:34:00.878+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_bootstrap_daily to 2025-09-04 00:30:00+00:00, run_after=2025-09-05 00:30:00+00:00
 [2025-09-05T11:34:00.898+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:34:00.898+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_short_cycle_15m to 2025-09-05 11:15:00+00:00, run_after=2025-09-05 11:30:00+00:00
 [2025-09-05T11:34:00.938+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_dag.py took 0.426 seconds
+[2025-09-05T11:34:31.329+0000] {processor.py:161} INFO - Started process (PID=50907) to work on /opt/airflow/dags/mntrading_dag.py
+[2025-09-05T11:34:31.332+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_dag.py for tasks to queue
+[2025-09-05T11:34:31.335+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:34:31.335+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_dag.py
+[2025-09-05T11:34:31.465+0000] {processor.py:840} INFO - DAG(s) 'mntrading_bootstrap_daily', 'mntrading_short_cycle_15m' retrieved from /opt/airflow/dags/mntrading_dag.py
+[2025-09-05T11:34:31.631+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:34:31.630+0000] {dag.py:3096} INFO - Sync 2 DAGs
+[2025-09-05T11:34:31.811+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:34:31.810+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_bootstrap_daily to 2025-09-04 00:30:00+00:00, run_after=2025-09-05 00:30:00+00:00
+[2025-09-05T11:34:31.859+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:34:31.859+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_short_cycle_15m to 2025-09-05 11:15:00+00:00, run_after=2025-09-05 11:30:00+00:00
+[2025-09-05T11:34:32.023+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_dag.py took 0.716 seconds
+[2025-09-05T11:35:03.047+0000] {processor.py:161} INFO - Started process (PID=50927) to work on /opt/airflow/dags/mntrading_dag.py
+[2025-09-05T11:35:03.052+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_dag.py for tasks to queue
+[2025-09-05T11:35:03.061+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:35:03.060+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_dag.py
+[2025-09-05T11:35:03.186+0000] {processor.py:840} INFO - DAG(s) 'mntrading_bootstrap_daily', 'mntrading_short_cycle_15m' retrieved from /opt/airflow/dags/mntrading_dag.py
+[2025-09-05T11:35:03.349+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:35:03.348+0000] {dag.py:3096} INFO - Sync 2 DAGs
+[2025-09-05T11:35:03.478+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:35:03.478+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_bootstrap_daily to 2025-09-04 00:30:00+00:00, run_after=2025-09-05 00:30:00+00:00
+[2025-09-05T11:35:03.496+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:35:03.496+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_short_cycle_15m to 2025-09-05 11:15:00+00:00, run_after=2025-09-05 11:30:00+00:00
+[2025-09-05T11:35:03.552+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_dag.py took 0.526 seconds
