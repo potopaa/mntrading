@@ -9469,3 +9469,164 @@
 [2025-09-05T11:35:18.665+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:35:18.664+0000] {dag.py:3096} INFO - Sync 1 DAGs
 [2025-09-05T11:35:18.723+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:35:18.723+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
 [2025-09-05T11:35:18.809+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.513 seconds
+[2025-09-05T11:35:49.620+0000] {processor.py:161} INFO - Started process (PID=50957) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:35:49.624+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:35:49.634+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:35:49.633+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:35:49.762+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:35:49.980+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:35:49.979+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:35:50.074+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:35:50.074+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:35:50.221+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.628 seconds
+[2025-09-05T11:36:22.326+0000] {processor.py:161} INFO - Started process (PID=50977) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:36:22.347+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:36:22.354+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:36:22.353+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:36:23.117+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:36:23.654+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:36:23.654+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:36:23.764+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:36:23.753+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:36:23.875+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 1.790 seconds
+[2025-09-05T11:36:55.842+0000] {processor.py:161} INFO - Started process (PID=51000) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:36:55.844+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:36:55.885+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:36:55.884+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:36:56.139+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:36:56.663+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:36:56.662+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:36:56.756+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:36:56.755+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:36:56.895+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 1.116 seconds
+[2025-09-05T11:37:27.361+0000] {processor.py:161} INFO - Started process (PID=51022) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:37:27.363+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:37:27.366+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:37:27.365+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:37:27.451+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:37:27.589+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:37:27.589+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:37:27.631+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:37:27.631+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:37:27.771+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.447 seconds
+[2025-09-05T11:37:58.119+0000] {processor.py:161} INFO - Started process (PID=51042) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:37:58.121+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:37:58.124+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:37:58.123+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:37:58.196+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:37:58.316+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:37:58.315+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:37:58.382+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:37:58.381+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:37:58.482+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.385 seconds
+[2025-09-05T11:38:28.992+0000] {processor.py:161} INFO - Started process (PID=51062) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:38:29.001+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:38:29.004+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:38:29.003+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:38:29.080+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:38:29.217+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:38:29.216+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:38:29.272+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:38:29.271+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:38:29.331+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.362 seconds
+[2025-09-05T11:38:59.428+0000] {processor.py:161} INFO - Started process (PID=51082) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:38:59.431+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:38:59.434+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:38:59.432+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:38:59.485+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:38:59.586+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:38:59.586+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:38:59.615+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:38:59.615+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:38:59.650+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.235 seconds
+[2025-09-05T11:39:30.127+0000] {processor.py:161} INFO - Started process (PID=51102) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:39:30.129+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:39:30.132+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:39:30.131+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:39:30.197+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:39:30.332+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:39:30.331+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:39:30.368+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:39:30.367+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:39:30.425+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.320 seconds
+[2025-09-05T11:40:00.827+0000] {processor.py:161} INFO - Started process (PID=51117) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:40:00.828+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:40:00.830+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:40:00.829+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:40:00.871+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:40:00.950+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:40:00.949+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:40:00.994+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:40:00.994+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:40:01.046+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.233 seconds
+[2025-09-05T11:40:31.644+0000] {processor.py:161} INFO - Started process (PID=51137) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:40:31.645+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:40:31.647+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:40:31.646+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:40:31.688+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:40:31.772+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:40:31.771+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:40:31.802+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:40:31.802+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:40:31.889+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.257 seconds
+[2025-09-05T11:41:02.619+0000] {processor.py:161} INFO - Started process (PID=51157) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:41:02.634+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:41:02.637+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:41:02.636+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:41:02.678+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:41:02.766+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:41:02.766+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:41:02.792+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:41:02.791+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:41:02.829+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.235 seconds
+[2025-09-05T11:41:33.222+0000] {processor.py:161} INFO - Started process (PID=51177) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:41:33.235+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:41:33.237+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:41:33.236+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:41:33.327+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:41:33.582+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:41:33.581+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:41:33.671+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:41:33.671+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:41:33.773+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.631 seconds
+[2025-09-05T11:42:04.034+0000] {processor.py:161} INFO - Started process (PID=51197) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:42:04.036+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:42:04.037+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:42:04.037+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:42:04.094+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:42:04.302+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:42:04.302+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:42:04.356+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:42:04.355+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:42:04.479+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.459 seconds
+[2025-09-05T11:42:35.263+0000] {processor.py:161} INFO - Started process (PID=51217) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:42:35.266+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:42:35.269+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:42:35.267+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:42:35.346+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:42:35.472+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:42:35.471+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:42:35.512+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:42:35.512+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:42:35.566+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.324 seconds
+[2025-09-05T11:43:05.690+0000] {processor.py:161} INFO - Started process (PID=51237) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:43:05.692+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:43:05.693+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:43:05.693+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:43:05.727+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:43:05.795+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:43:05.794+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:43:05.826+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:43:05.826+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:43:05.896+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.242 seconds
+[2025-09-05T11:43:36.599+0000] {processor.py:161} INFO - Started process (PID=51257) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:43:36.610+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:43:36.612+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:43:36.611+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:43:36.693+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:43:36.841+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:43:36.831+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:43:36.941+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:43:36.941+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:43:37.126+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.563 seconds
+[2025-09-05T11:44:07.364+0000] {processor.py:161} INFO - Started process (PID=51277) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:44:07.370+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:44:07.372+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:44:07.371+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:44:07.458+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:44:07.654+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:44:07.654+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:44:07.688+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:44:07.688+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:44:07.753+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.430 seconds
+[2025-09-05T11:44:38.440+0000] {processor.py:161} INFO - Started process (PID=51297) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:44:38.442+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:44:38.445+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:44:38.444+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:44:38.541+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:44:39.007+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:44:38.997+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:44:39.088+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:44:39.084+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:44:39.287+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.925 seconds
+[2025-09-05T11:45:09.444+0000] {processor.py:161} INFO - Started process (PID=51317) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:45:09.447+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:45:09.449+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:45:09.448+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:45:09.483+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:45:09.552+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:45:09.551+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:45:09.581+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:45:09.581+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:45:09.636+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.209 seconds
+[2025-09-05T11:45:40.516+0000] {processor.py:161} INFO - Started process (PID=51337) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:45:40.527+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:45:40.530+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:45:40.529+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:45:40.579+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:45:40.719+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:45:40.718+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:45:40.744+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:45:40.743+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:45:40.779+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.295 seconds
+[2025-09-05T11:46:11.247+0000] {processor.py:161} INFO - Started process (PID=51357) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:46:11.249+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:46:11.251+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:46:11.250+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:46:11.284+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:46:11.343+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:46:11.343+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:46:11.362+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:46:11.361+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:46:11.397+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.163 seconds
+[2025-09-05T11:46:41.860+0000] {processor.py:161} INFO - Started process (PID=51377) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:46:41.862+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:46:41.864+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:46:41.863+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:46:41.909+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:46:41.983+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:46:41.983+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:46:42.007+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:46:42.006+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:46:42.047+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.211 seconds
+[2025-09-05T11:47:12.608+0000] {processor.py:161} INFO - Started process (PID=51397) to work on /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:47:12.611+0000] {processor.py:830} INFO - Processing file /opt/airflow/dags/mntrading_full_pipeline.py for tasks to queue
+[2025-09-05T11:47:12.614+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:47:12.613+0000] {dagbag.py:545} INFO - Filling up the DagBag from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:47:12.738+0000] {processor.py:840} INFO - DAG(s) 'mntrading_full_pipeline' retrieved from /opt/airflow/dags/mntrading_full_pipeline.py
+[2025-09-05T11:47:12.852+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:47:12.852+0000] {dag.py:3096} INFO - Sync 1 DAGs
+[2025-09-05T11:47:12.909+0000] {logging_mixin.py:188} INFO - [2025-09-05T11:47:12.908+0000] {dag.py:3954} INFO - Setting next_dagrun for mntrading_full_pipeline to None, run_after=None
+[2025-09-05T11:47:12.965+0000] {processor.py:183} INFO - Processing /opt/airflow/dags/mntrading_full_pipeline.py took 0.381 seconds
