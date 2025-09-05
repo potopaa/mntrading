@@ -3,6 +3,10 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
+<<<<<<< HEAD
+=======
+
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
 import click
 
 
@@ -76,6 +80,14 @@ def _load_backtest_metrics(summary_path: Optional[Path]) -> Dict[str, Dict[str, 
 
 
 def _load_champions(registry_path: Optional[Path]) -> List[Dict[str, Any]]:
+<<<<<<< HEAD
+=======
+    """
+    Accept registry formats:
+      {'pairs': [{'pair': 'A__B', 'model_path': '...', 'metrics': {...}}, ...]}
+      or similar lists under keys like 'items', 'selected', 'champions', 'models', 'registry'.
+    """
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
     if not registry_path or not registry_path.exists():
         return []
     obj = _read_json(registry_path)
@@ -93,6 +105,10 @@ def _load_champions(registry_path: Optional[Path]) -> List[Dict[str, Any]]:
                     out.append({"pair": str(pair), "model_path": model, "metrics": met})
             if out:
                 return out
+<<<<<<< HEAD
+=======
+    # mapping dict form {'A__B': {...}}
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
     if isinstance(obj, dict) and any(isinstance(v, dict) for v in obj.values()):
         out = []
         for k, v in obj.items():

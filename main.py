@@ -497,20 +497,140 @@ def step_train(use_dataset: bool, n_splits: int, gap: int, max_train_size: int, 
     report_path = MODELS_DIR / "_train_report.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     _upload_dir(MODELS_DIR, "models/")
+
+    # ---- MLflow registration & challenger/champion promotion (injected) ----
+    try:
+        import os, json as _json, statistics as _stats
+        import mlflow
+        from mlflow.tracking import MlflowClient
+
+        # Aggregate AUC over champions across pairs (fallback to accuracy if AUC missing)
+        aucs = []
+        accs = []
+        for item in (report.get("items") or []):
+            if item.get("skipped"):
+                continue
+            met = (item.get("metrics") or {}).get(item.get("champion") or "", {})
+            if isinstance(met, dict):
+                if "auc" in met and isinstance(met["auc"], (int, float)):
+                    aucs.append(float(met["auc"]))
+                if "accuracy" in met and isinstance(met["accuracy"], (int, float)):
+                    accs.append(float(met["accuracy"]))
+        agg_auc = float(_stats.fmean(aucs)) if aucs else None
+        agg_acc = float(_stats.fmean(accs)) if accs else None
+
+        exp_name = os.getenv("MLFLOW_EXPERIMENT_NAME", "mntrading")
+        mlflow.set_experiment(exp_name)
+        with mlflow.start_run(run_name="train_full", nested=True) as run:
+            if agg_auc is not None:
+                mlflow.log_metric("oof_auc_mean", agg_auc)
+            if agg_acc is not None:
+                mlflow.log_metric("oof_acc_mean", agg_acc)
+            mlflow.log_artifact(str(report_path), artifact_path="reports")
+            # Log the whole models dir as a bundle
+            mlflow.log_artifacts(str(MODELS_DIR), artifact_path="bundle")
+            run_id = run.info.run_id
+
+        client = MlflowClient()
+        model_name = os.getenv("MLFLOW_MODEL_NAME", "mntrading_model")
+        mv = client.create_model_version(
+            name=model_name,
+            source=f"runs:/{run_id}/bundle",
+            run_id=run_id
+        )
+
+        # Simple challenger/champion: compare oof_auc_mean (or oof_acc_mean)
+        def _get_metric(rid, key):
+            r = client.get_run(rid)
+            return r.data.metrics.get(key)
+
+        # Find current Production, if any
+        current_prod = None
+        for v in client.search_model_versions(f"name='{model_name}'"):
+            if v.current_stage == "Production":
+                current_prod = v
+                break
+
+        new_auc = _get_metric(run_id, "oof_auc_mean")
+        new_acc = _get_metric(run_id, "oof_acc_mean")
+
+        better = False
+        if current_prod is None:
+            better = True
+        else:
+            old_auc = _get_metric(current_prod.run_id, "oof_auc_mean")
+            old_acc = _get_metric(current_prod.run_id, "oof_acc_mean")
+            # Prefer AUC if available, else accuracy
+            if new_auc is not None and old_auc is not None:
+                better = (new_auc >= old_auc)
+            elif new_acc is not None and old_acc is not None:
+                better = (new_acc >= old_acc)
+            elif new_auc is not None and old_auc is None:
+                better = True
+            elif new_acc is not None and old_acc is None:
+                better = True
+
+        if better:
+            if current_prod is not None:
+                client.transition_model_version_stage(model_name, current_prod.version, stage="Archived")
+            client.transition_model_version_stage(model_name, mv.version, stage="Production")
+            print(f"[mlflow] Promoted {model_name} v{mv.version} to Production")
+        else:
+            client.transition_model_version_stage(model_name, mv.version, stage="Staging")
+            print(f"[mlflow] Registered {model_name} v{mv.version} to Staging")
+    except Exception as e:
+        print(f"[mlflow] WARN: registration/promotion skipped: {e}")
+    # ---- end MLflow block ----
     print(f"[train] report -> s3://.../models/_train_report.json")
 
+
 def step_backtest(signals_from: str, proba_threshold: float, fee_rate: float):
+    """Run backtest and persist a normalized summary JSON for the UI/report."""
     _ensure_local_dir("features/", FEATURES_DIR.parent)
     _ensure_local_dir("datasets/", DATASETS_DIR.parent)
     _ensure_local_dir("models/", MODELS_DIR)
-    if not HAS_BT: raise SystemExit("backtest.runner not available")
-    summary = run_backtest(features_dir=str(FEATURES_DIR), datasets_dir=str(DATASETS_DIR), models_dir=str(MODELS_PAIRS_DIR),
-                           out_dir=str(BACKTEST_DIR), signals_from=signals_from, proba_threshold=proba_threshold, fee_rate=fee_rate)
-    summary_path = BACKTEST_DIR / "_summary.json"
-    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    _upload_dir(BACKTEST_DIR, "backtest/")
-    print(f"[backtest] summary -> s3://.../backtest/_summary.json")
+    if not HAS_BT:
+        raise SystemExit("backtest.runner not available")
 
+    # run the actual backtest
+    summary = run_backtest(
+        features_dir=str(FEATURES_DIR),
+        datasets_dir=str(DATASETS_DIR),
+        models_dir=str(MODELS_PAIRS_DIR),
+        out_dir=str(BACKTEST_DIR),
+        signals_from=signals_from,
+        proba_threshold=proba_threshold,
+        fee_rate=fee_rate,
+    )
+
+    # Normalize keys for UI stability
+    def _f(x, default=0.0):
+        try:
+            return float(x)
+        except Exception:
+            return float(default)
+
+    norm = {
+        "start": summary.get("start"),
+        "end": summary.get("end"),
+        "n_trades": int(summary.get("n_trades", 0) or 0),
+        "gross_return": _f(summary.get("gross_return", summary.get("return", 0.0)), 0.0),
+        "net_return": _f(summary.get("net_return", summary.get("net", summary.get("return", 0.0))), 0.0),
+        "max_dd": _f(summary.get("max_dd", summary.get("max_drawdown", 0.0)), 0.0),
+        "sharpe": _f(summary.get("sharpe", 0.0), 0.0),
+        "win_rate": _f(summary.get("win_rate", 0.0), 0.0),
+        "threshold": float(proba_threshold),
+        "signals_from": str(signals_from),
+        "pairs": summary.get("pairs", {}),
+    }
+
+    BACKTEST_DIR.mkdir(parents=True, exist_ok=True)
+    summary_path = BACKTEST_DIR / "_summary.json"
+    summary_path.write_text(json.dumps(norm, indent=2), encoding="utf-8")
+    _upload_dir(BACKTEST_DIR, "backtest/")
+    print(f"[backtest] summary -> {summary_path}")
+
+<<<<<<< HEAD
 def step_select(
     summary_path: str,
     registry_out: str,
@@ -780,6 +900,8 @@ def main():
         step_aggregate(args.signals_dir, str(FEATURES_DIR / "_manifest.json"), args.proba_threshold, args.top_k, args.portfolio_dir)
     elif args.mode == "report":
         step_report(args.orders_json, args.summary_path, args.report_out)
+=======
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
 
 if __name__ == "__main__":
     main()

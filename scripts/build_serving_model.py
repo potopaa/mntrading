@@ -1,9 +1,22 @@
+<<<<<<< HEAD
+=======
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# scripts/build_serving_model.py
+# Router model that loads per-pair models from MLflow Model Registry at runtime.
+# No local model files are required. All comments are in English by request.
+
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
 from __future__ import annotations
 import argparse
 import json
 import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+<<<<<<< HEAD
+=======
+
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
 import mlflow
 import mlflow.pyfunc
 from mlflow.tracking import MlflowClient
@@ -11,6 +24,13 @@ from mlflow.entities import ViewType
 from mlflow.exceptions import MlflowException
 
 
+<<<<<<< HEAD
+=======
+# --------------------------
+# Helpers
+# --------------------------
+
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
 def _read_json(p: Path) -> dict:
     if not p.exists():
         raise FileNotFoundError(f"File not found: {p}")
@@ -36,6 +56,12 @@ def _ensure_experiment(tracking_uri: str, name: str) -> None:
 
 
 def _pairs_from_registry_json(registry_path: Path, top_k: int) -> List[str]:
+<<<<<<< HEAD
+=======
+    """
+    Read pairs list from data/models/registry.json, trying several common schemas.
+    """
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
     obj = _read_json(registry_path)
     arr: Optional[List[dict]] = None
     for key in ("pairs", "items", "selected", "champions", "models", "registry"):
@@ -52,6 +78,10 @@ def _pairs_from_registry_json(registry_path: Path, top_k: int) -> List[str]:
     if not arr:
         return []
 
+<<<<<<< HEAD
+=======
+    # Sort by Sharpe if present, otherwise keep order
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
     def _score(d: dict) -> float:
         return float((d.get("metrics") or {}).get("sharpe", 0.0))
 
@@ -76,10 +106,20 @@ def _build_mapping_from_mlflow(
     prefix: str,
     stage: str,
 ) -> Dict[str, str]:
+<<<<<<< HEAD
+=======
+    """
+    Map pair_key -> models:/<name>/<stage>. Only include models that actually exist.
+    """
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
     mapping: Dict[str, str] = {}
     for pair in pairs:
         name = _model_name_for_pair(prefix, pair)
         try:
+<<<<<<< HEAD
+=======
+            # Verify there is at least one version; if stage is specified, ensure it exists.
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
             versions = client.search_model_versions(f"name='{name}'")
             if not versions:
                 continue
@@ -90,11 +130,34 @@ def _build_mapping_from_mlflow(
             uri = f"models:/{name}/{stage}" if stage and stage != "None" else f"models:/{name}"
             mapping[_canon_key(pair)] = uri
         except Exception:
+<<<<<<< HEAD
+=======
+            # If anything goes wrong for a pair, just skip it
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
             continue
     return mapping
 
 
+<<<<<<< HEAD
 class RouterModel(mlflow.pyfunc.PythonModel):
+=======
+# --------------------------
+# Router pyfunc
+# --------------------------
+
+class RouterModel(mlflow.pyfunc.PythonModel):
+    """
+    Router pyfunc model that loads sub-models from MLflow Model Registry (URIs)
+    and dispatches predictions per pair.
+
+    Expected input: pandas.DataFrame with:
+      - 'pair' column (original 'AAA/USDT__BBB/USDT' style)
+      - numeric feature columns (non-numeric are ignored)
+      - optional 'z' column for direction sign; if not present, side is {1 if proba>=thr else 0}
+    Output: DataFrame with ['pair','proba','side'].
+    """
+
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
     def load_context(self, context):
         import pandas as pd
         import numpy as np
@@ -107,11 +170,19 @@ class RouterModel(mlflow.pyfunc.PythonModel):
         self.proba_threshold = float(cfg.get("proba_threshold", 0.55))
         self.mapping: Dict[str, str] = cfg.get("uri_mapping", {})
 
+<<<<<<< HEAD
+=======
+        # Preload sub-models from MLflow (this requires MLFLOW_TRACKING_URI and S3 env set in the serving container)
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
         self.models: Dict[str, mlflow.pyfunc.PyFuncModel] = {}
         for key, uri in self.mapping.items():
             try:
                 self.models[key] = mlflow.pyfunc.load_model(uri)
             except Exception:
+<<<<<<< HEAD
+=======
+                # Leave missing; such pairs will yield flat side=0
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
                 self.models[key] = None
 
     def _predict_proba1(self, model, X):
@@ -150,11 +221,16 @@ class RouterModel(mlflow.pyfunc.PythonModel):
             key = _canon_key(pair)
             sub = self.models.get(key)
             if sub is None:
+<<<<<<< HEAD
+=======
+                # No model available — flat signal
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
                 for _ in range(len(grp)):
                     out.append({"pair": pair, "proba": 0.0, "side": 0})
                 continue
 
             X = grp[feat_cols].to_numpy(dtype="float64", copy=False)
+<<<<<<< HEAD
             try:
                 pred = sub.predict(grp[feat_cols])
                 if hasattr(pred, "values"):
@@ -163,6 +239,21 @@ class RouterModel(mlflow.pyfunc.PythonModel):
                 if proba.min() < 0.0 or proba.max() > 1.0:
                     proba = 1.0 / (1.0 + np.exp(-proba))
             except Exception:
+=======
+            # mlflow pyfunc returns ndarray or pd.Series
+            try:
+                pred = sub.predict(grp[feat_cols])
+                # Try to coerce into 1D array of probabilities
+                if hasattr(pred, "values"):
+                    pred = pred.values
+                proba = np.asarray(pred, dtype="float64").reshape(-1)
+                # If model returned logits/scores, they should have been wrapped.
+                # If they are outside [0..1], squash:
+                if proba.min() < 0.0 or proba.max() > 1.0:
+                    proba = 1.0 / (1.0 + np.exp(-proba))
+            except Exception:
+                # Fallback generic path
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
                 proba = self._predict_proba1(sub, X)
 
             if z_col and z_col in grp.columns:
@@ -177,6 +268,12 @@ class RouterModel(mlflow.pyfunc.PythonModel):
         return pd.DataFrame(out, columns=["pair", "proba", "side"])
 
 
+<<<<<<< HEAD
+=======
+# --------------------------
+# Entry point
+# --------------------------
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
 
 def main():
     ap = argparse.ArgumentParser(description="Build and register MLflow Serving router model (loads sub-models from MLflow Registry)")
@@ -203,6 +300,10 @@ def main():
         print("[router] nothing to pack (no MLflow models found for requested pairs/stage)")
         return
 
+<<<<<<< HEAD
+=======
+    # Persist small config as artifact and log router model
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
     cfg = {
         "proba_threshold": float(args.proba_threshold),
         "uri_mapping": uri_mapping,  # pair_key -> models:/name/stage
@@ -227,6 +328,10 @@ def main():
         )
         model_uri = f"runs:/{run.info.run_id}/model"
 
+<<<<<<< HEAD
+=======
+    # Register router and (optionally) transition to stage
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
     try:
         client.get_registered_model(args.registered_name)
     except MlflowException:
@@ -251,4 +356,8 @@ def main():
 
 
 if __name__ == "__main__":
+<<<<<<< HEAD
     main()
+=======
+    main()
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700

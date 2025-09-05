@@ -30,6 +30,14 @@ def _glob_models(models_dir: Path, max_files: int = 10) -> List[Path]:
 
 
 def _ensure_experiment(tracking_uri: str, name: str) -> str:
+<<<<<<< HEAD
+=======
+    """
+    Ensure experiment exists and is active.
+    If deleted, try to restore; if restoration fails, create '<name>_v2'.
+    Returns the final experiment name to use.
+    """
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
     mlflow.set_tracking_uri(tracking_uri)
     try:
         mlflow.set_experiment(name)
@@ -65,6 +73,10 @@ def main():
     exp_name = _ensure_experiment(tracking_uri, args.experiment)
 
     with mlflow.start_run(run_name=f"mntrading_{os.environ.get('HOSTNAME','local')}"):
+<<<<<<< HEAD
+=======
+        # train report: params, metrics, artifact
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
         tr = _read_json(args.train_report) if args.train_report else None
         if tr:
             params = tr.get("params") or tr.get("config") or {}
@@ -77,6 +89,10 @@ def main():
                 except Exception: pass
             mlflow.log_artifact(str(args.train_report))
 
+<<<<<<< HEAD
+=======
+        # backtest summary: artifact + aggregate metrics
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
         bs = _read_json(args.backtest_summary) if args.backtest_summary else None
         if bs:
             mlflow.log_artifact(str(args.backtest_summary))
@@ -87,12 +103,24 @@ def main():
                 if sh: mlflow.log_metric("backtest_sharpe_mean", sum(sh)/len(sh))
                 if dd: mlflow.log_metric("backtest_maxdd_mean", sum(dd)/len(dd))
 
+<<<<<<< HEAD
         if args.registry and args.registry.exists(): mlflow.log_artifact(str(args.registry))
         if args.prod_map and args.prod_map.exists(): mlflow.log_artifact(str(args.prod_map))
 
         for p in _glob_models(args.models_dir, max_files=20):
             mlflow.log_artifact(str(p))
 
+=======
+        # registry / prod-map
+        if args.registry and args.registry.exists(): mlflow.log_artifact(str(args.registry))
+        if args.prod_map and args.prod_map.exists(): mlflow.log_artifact(str(args.prod_map))
+
+        # model artifacts (limited)
+        for p in _glob_models(args.models_dir, max_files=20):
+            mlflow.log_artifact(str(p))
+
+        # extra artifacts
+>>>>>>> 227f8359141ef32f8d3f3d29b3512f9332ccc700
         if args.artifacts:
             for art in args.artifacts:
                 if art.exists():
